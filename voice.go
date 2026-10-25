@@ -1,5 +1,5 @@
 // Discordgo - Discord bindings for Go
-// Available at https://github.com/bwmarrin/discordgo
+// Available at https://github.com/rxzsu/discordgo
 
 // Copyright 2015-2016 Bruce Marriner <bruce@sqls.net>.  All rights reserved.
 // Use of this source code is governed by a BSD-style
@@ -10,6 +10,7 @@
 package discordgo
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/binary"
@@ -21,7 +22,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 )
 
 // ------------------------------------------------------------------------------------------------
@@ -101,7 +103,7 @@ func (v *VoiceConnection) Speaking(b bool) (err error) {
 
 	data := voiceSpeakingOp{5, voiceSpeakingData{b, 0}}
 	v.wsMutex.Lock()
-	err = v.wsConn.WriteJSON(data)
+	err = wsjson.Write(context.Background(), v.wsConn, data)
 	v.wsMutex.Unlock()
 
 	v.Lock()
@@ -125,7 +127,7 @@ func (v *VoiceConnection) ChangeChannel(channelID string, mute, deaf bool) (err 
 
 	data := voiceChannelJoinOp{4, voiceChannelJoinData{&v.GuildID, &channelID, mute, deaf}}
 	v.session.wsMutex.Lock()
-	err = v.session.wsConn.WriteJSON(data)
+	err = wsjson.Write(context.Background(), v.session.wsConn, data)
 	v.session.wsMutex.Unlock()
 	if err != nil {
 		return
@@ -147,7 +149,7 @@ func (v *VoiceConnection) Disconnect() (err error) {
 	if v.sessionID != "" {
 		data := voiceChannelJoinOp{4, voiceChannelJoinData{&v.GuildID, nil, true, true}}
 		v.session.wsMutex.Lock()
-		err = v.session.wsConn.WriteJSON(data)
+		err = wsjson.Write(context.Background(), v.session.wsConn, data)
 		v.session.wsMutex.Unlock()
 		v.sessionID = ""
 	}
@@ -194,24 +196,16 @@ func (v *VoiceConnection) Close() {
 	if v.wsConn != nil {
 		v.log(LogInformational, "sending close frame")
 
-		// To cleanly close a connection, a client should send a close
-		// frame and wait for the server to close the connection.
+		// Close sends the close frame and waits (up to 5 seconds) for the
+		// server to acknowledge it before closing the connection.
 		v.wsMutex.Lock()
-		err := v.wsConn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		closeErr := v.wsConn.Close(websocket.StatusNormalClosure, "")
 		v.wsMutex.Unlock()
-		if err != nil {
-			v.log(LogError, "error closing websocket, %s", err)
+		if closeErr != nil {
+			v.log(LogError, "error closing websocket, %s", closeErr)
 		}
-
-		// TODO: Wait for Discord to actually close the connection.
-		time.Sleep(1 * time.Second)
 
 		v.log(LogInformational, "closing websocket")
-		err = v.wsConn.Close()
-		if err != nil {
-			v.log(LogError, "error closing websocket, %s", err)
-		}
-
 		v.wsConn = nil
 	}
 }
@@ -312,7 +306,9 @@ func (v *VoiceConnection) open() (err error) {
 	// Connect to VoiceConnection Websocket
 	vg := "wss://" + strings.TrimSuffix(v.endpoint, ":80")
 	v.log(LogInformational, "connecting to voice endpoint %s", vg)
-	v.wsConn, _, err = v.session.Dialer.Dial(vg, nil)
+	dialCtx, cancelDial := context.WithTimeout(context.Background(), v.session.DialTimeout)
+	defer cancelDial()
+	v.wsConn, _, err = websocket.Dial(dialCtx, vg, nil)
 	if err != nil {
 		v.log(LogWarning, "error connecting to voice endpoint %s, %s", vg, err)
 		v.log(LogDebug, "voice struct: %#v\n", v)
@@ -332,7 +328,7 @@ func (v *VoiceConnection) open() (err error) {
 	data := voiceHandshakeOp{0, voiceHandshakeData{v.GuildID, v.UserID, v.sessionID, v.token}}
 
 	v.wsMutex.Lock()
-	err = v.wsConn.WriteJSON(data)
+	err = wsjson.Write(context.Background(), v.wsConn, data)
 	v.wsMutex.Unlock()
 	if err != nil {
 		v.log(LogWarning, "error sending init packet, %s", err)
@@ -356,11 +352,11 @@ func (v *VoiceConnection) wsListen(wsConn *websocket.Conn, close <-chan struct{}
 	v.log(LogInformational, "called")
 
 	for {
-		_, message, err := v.wsConn.ReadMessage()
+		_, message, err := wsConn.Read(context.Background())
 		if err != nil {
 			// 4014 indicates a manual disconnection by someone in the guild;
 			// we shouldn't reconnect.
-			if websocket.IsCloseError(err, 4014) {
+			if websocket.CloseStatus(err) == 4014 {
 				v.log(LogInformational, "received 4014 manual disconnection")
 
 				// Abandon the voice WS connection
@@ -539,7 +535,7 @@ func (v *VoiceConnection) wsHeartbeat(wsConn *websocket.Conn, close <-chan struc
 	for {
 		v.log(LogDebug, "sending heartbeat packet")
 		v.wsMutex.Lock()
-		err = wsConn.WriteJSON(voiceHeartbeatOp{3, int(time.Now().Unix())})
+		err = wsjson.Write(context.Background(), wsConn, voiceHeartbeatOp{3, int(time.Now().Unix())})
 		v.wsMutex.Unlock()
 		if err != nil {
 			v.log(LogError, "error sending heartbeat to voice endpoint %s, %s", v.endpoint, err)
@@ -662,7 +658,7 @@ func (v *VoiceConnection) udpOpen() (err error) {
 	data := voiceUDPOp{1, voiceUDPD{"udp", voiceUDPData{ip, port, "aead_aes256_gcm_rtpsize"}}}
 
 	v.wsMutex.Lock()
-	err = v.wsConn.WriteJSON(data)
+	err = wsjson.Write(context.Background(), v.wsConn, data)
 	v.wsMutex.Unlock()
 	if err != nil {
 		v.log(LogWarning, "udp write error, %#v, %s", data, err)
@@ -993,7 +989,7 @@ func (v *VoiceConnection) reconnect() {
 		// Send a OP4 with a nil channel to disconnect
 		data := voiceChannelJoinOp{4, voiceChannelJoinData{&v.GuildID, nil, true, true}}
 		v.session.wsMutex.Lock()
-		err = v.session.wsConn.WriteJSON(data)
+		err = wsjson.Write(context.Background(), v.session.wsConn, data)
 		v.session.wsMutex.Unlock()
 		if err != nil {
 			v.log(LogError, "error sending disconnect packet, %s", err)

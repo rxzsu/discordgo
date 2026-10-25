@@ -1,5 +1,5 @@
 // Discordgo - Discord bindings for Go
-// Available at https://github.com/bwmarrin/discordgo
+// Available at https://github.com/rxzsu/discordgo
 
 // Copyright 2015-2016 Bruce Marriner <bruce@sqls.net>.  All rights reserved.
 // Use of this source code is governed by a BSD-style
@@ -19,7 +19,6 @@ import (
 	_ "image/jpeg" // For JPEG decoding
 	_ "image/png"  // For PNG decoding
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
@@ -80,6 +79,16 @@ func newRestError(req *http.Request, resp *http.Response, body []byte) *RESTErro
 // Error returns a Rest API Error with its status code and body.
 func (r RESTError) Error() string {
 	return "HTTP " + r.Response.Status + ", " + string(r.ResponseBody)
+}
+
+// Code returns the Discord API error code of the underlying error message,
+// or 0 if the response body did not contain one.
+// See: https://discord.com/developers/docs/topics/response-codes
+func (r RESTError) Code() int {
+	if r.Message != nil {
+		return r.Message.Code
+	}
+	return 0
 }
 
 // RateLimitError is returned when a request exceeds a rate limit
@@ -160,6 +169,39 @@ func WithLocale(locale Locale) RequestOption {
 func WithContext(ctx context.Context) RequestOption {
 	return func(cfg *RequestConfig) {
 		cfg.Request = cfg.Request.WithContext(ctx)
+	}
+}
+
+// WithTimeout applies a timeout to the request; the request is aborted
+// with a context error if it has not completed within d.
+func WithTimeout(d time.Duration) RequestOption {
+	return func(cfg *RequestConfig) {
+		ctx, cancel := context.WithTimeout(cfg.Request.Context(), d)
+		// cancel is intentionally not called here: the context must stay
+		// alive for the lifetime of the in-flight http.Request.
+		_ = cancel
+		cfg.Request = cfg.Request.WithContext(ctx)
+	}
+}
+
+// WithQuery sets a query parameter on the request URL.
+func WithQuery(key, value string) RequestOption {
+	return func(cfg *RequestConfig) {
+		q := cfg.Request.URL.Query()
+		q.Set(key, value)
+		cfg.Request.URL.RawQuery = q.Encode()
+	}
+}
+
+// sleepCtx sleeps for d, or returns the context's error early if ctx is done.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 
@@ -249,7 +291,7 @@ func (s *Session) RequestWithLockedBucket(method, urlStr, contentType string, b 
 		return
 	}
 
-	response, err = ioutil.ReadAll(resp.Body)
+	response, err = io.ReadAll(resp.Body)
 	if err != nil {
 		return
 	}
@@ -276,6 +318,10 @@ func (s *Session) RequestWithLockedBucket(method, urlStr, contentType string, b 
 	case http.StatusBadGateway:
 		// Retry sending request if possible
 		if sequence < cfg.MaxRestRetries {
+			if ctxErr := req.Context().Err(); ctxErr != nil {
+				err = ctxErr
+				return
+			}
 
 			s.log(LogInformational, "%s Failed (%s), Retrying...", urlStr, resp.Status)
 			response, err = s.RequestWithLockedBucket(method, urlStr, contentType, b, s.Ratelimiter.LockBucketObject(bucket), sequence+1, options...)
@@ -294,17 +340,20 @@ func (s *Session) RequestWithLockedBucket(method, urlStr, contentType string, b 
 			s.log(LogInformational, "Rate Limiting %s, retry in %v", urlStr, rl.RetryAfter)
 			s.handleEvent(rateLimitEventType, &RateLimit{TooManyRequests: &rl, URL: urlStr})
 
-			time.Sleep(rl.RetryAfter)
-			// we can make the above smarter
-			// this method can cause longer delays than required
+			// Wait out the rate limit, but abort early if the request
+			// context is cancelled or times out.
+			if sleepErr := sleepCtx(req.Context(), rl.RetryAfter); sleepErr != nil {
+				err = sleepErr
+				return
+			}
 
 			response, err = s.RequestWithLockedBucket(method, urlStr, contentType, b, s.Ratelimiter.LockBucketObject(bucket), sequence, options...)
 		} else {
 			err = &RateLimitError{&RateLimit{TooManyRequests: &rl, URL: urlStr}}
 		}
 	case http.StatusUnauthorized:
-		if strings.Index(s.Token, "Bot ") != 0 {
-			s.log(LogInformational, ErrUnauthorized.Error())
+		if !strings.HasPrefix(s.Token, "Bot ") {
+			s.log(LogInformational, "%s", ErrUnauthorized.Error())
 			err = ErrUnauthorized
 		}
 		fallthrough
@@ -2132,6 +2181,50 @@ func (s *Session) ChannelMessageCrosspost(channelID, messageID string, options .
 	endpoint := EndpointChannelMessageCrosspost(channelID, messageID)
 
 	body, err := s.RequestWithBucketID("POST", endpoint, nil, endpoint, options...)
+	if err != nil {
+		return
+	}
+
+	err = unmarshal(body, &st)
+	return
+}
+
+// ChannelPollAnswerVoters lists the users who voted for a specific answer
+// of a poll message.
+//
+//	channelID   : The ID of the channel the poll message is in.
+//	messageID   : The ID of the poll message.
+//	answerID    : The ID of the answer to fetch voters for.
+func (s *Session) ChannelPollAnswerVoters(channelID, messageID string, answerID int, options ...RequestOption) (voters []*User, err error) {
+	endpoint := EndpointPollAnswerVoters(channelID, messageID, answerID)
+
+	body, err := s.RequestWithBucketID("GET", endpoint, nil, endpoint, options...)
+	if err != nil {
+		return
+	}
+
+	answer := struct {
+		AnswerID int     `json:"answer_id"`
+		Users    []*User `json:"users"`
+	}{}
+	err = unmarshal(body, &answer)
+	if err != nil {
+		return
+	}
+
+	voters = answer.Users
+	return
+}
+
+// ChannelPollExpire expires a poll message immediately, without waiting
+// for its configured duration to pass.
+//
+//	channelID   : The ID of the channel the poll message is in.
+//	messageID   : The ID of the poll message.
+func (s *Session) ChannelPollExpire(channelID, messageID string, options ...RequestOption) (st *Message, err error) {
+	endpoint := EndpointPollExpire(channelID, messageID)
+
+	body, err := s.RequestWithBucketID("POST", endpoint, nil, EndpointPoll(channelID, messageID), options...)
 	if err != nil {
 		return
 	}

@@ -1,5 +1,5 @@
 // Discordgo - Discord bindings for Go
-// Available at https://github.com/bwmarrin/discordgo
+// Available at https://github.com/rxzsu/discordgo
 
 // Copyright 2015-2016 Bruce Marriner <bruce@sqls.net>.  All rights reserved.
 // Use of this source code is governed by a BSD-style
@@ -20,7 +20,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
 )
 
 // A Session represents a connection to the Discord API.
@@ -97,8 +97,8 @@ type Session struct {
 	// The http client used for REST requests
 	Client *http.Client
 
-	// The dialer used for WebSocket connection
-	Dialer *websocket.Dialer
+	// The timeout used when dialing WebSocket connections (gateway and voice).
+	DialTimeout time.Duration
 
 	// The user agent used for REST APIs
 	UserAgent string
@@ -3045,23 +3045,27 @@ const (
 
 	IntentGuildBans Intent = IntentGuildModeration
 
-	IntentsGuilds                 Intent = 1 << 0
-	IntentsGuildMembers           Intent = 1 << 1
-	IntentsGuildBans              Intent = 1 << 2
-	IntentsGuildEmojis            Intent = 1 << 3
-	IntentsGuildIntegrations      Intent = 1 << 4
-	IntentsGuildWebhooks          Intent = 1 << 5
-	IntentsGuildInvites           Intent = 1 << 6
-	IntentsGuildVoiceStates       Intent = 1 << 7
-	IntentsGuildPresences         Intent = 1 << 8
-	IntentsGuildMessages          Intent = 1 << 9
-	IntentsGuildMessageReactions  Intent = 1 << 10
-	IntentsGuildMessageTyping     Intent = 1 << 11
-	IntentsDirectMessages         Intent = 1 << 12
-	IntentsDirectMessageReactions Intent = 1 << 13
-	IntentsDirectMessageTyping    Intent = 1 << 14
-	IntentsMessageContent         Intent = 1 << 15
-	IntentsGuildScheduledEvents   Intent = 1 << 16
+	IntentsGuilds                      Intent = 1 << 0
+	IntentsGuildMembers                Intent = 1 << 1
+	IntentsGuildBans                   Intent = 1 << 2
+	IntentsGuildEmojis                 Intent = 1 << 3
+	IntentsGuildIntegrations           Intent = 1 << 4
+	IntentsGuildWebhooks               Intent = 1 << 5
+	IntentsGuildInvites                Intent = 1 << 6
+	IntentsGuildVoiceStates            Intent = 1 << 7
+	IntentsGuildPresences              Intent = 1 << 8
+	IntentsGuildMessages               Intent = 1 << 9
+	IntentsGuildMessageReactions       Intent = 1 << 10
+	IntentsGuildMessageTyping          Intent = 1 << 11
+	IntentsDirectMessages              Intent = 1 << 12
+	IntentsDirectMessageReactions      Intent = 1 << 13
+	IntentsDirectMessageTyping         Intent = 1 << 14
+	IntentsMessageContent              Intent = 1 << 15
+	IntentsGuildScheduledEvents        Intent = 1 << 16
+	IntentsAutoModerationConfiguration Intent = 1 << 20
+	IntentsAutoModerationExecution     Intent = 1 << 21
+	IntentsGuildMessagePolls           Intent = 1 << 24
+	IntentsDirectMessagePolls          Intent = 1 << 25
 
 	IntentsAllWithoutPrivileged = IntentGuilds |
 		IntentGuildBans |
@@ -3078,7 +3082,9 @@ const (
 		IntentDirectMessageTyping |
 		IntentGuildScheduledEvents |
 		IntentAutoModerationConfiguration |
-		IntentAutoModerationExecution
+		IntentAutoModerationExecution |
+		IntentGuildMessagePolls |
+		IntentDirectMessagePolls
 
 	IntentsAll = IntentsAllWithoutPrivileged |
 		IntentGuildMembers |

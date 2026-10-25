@@ -1,5 +1,5 @@
 // Discordgo - Discord bindings for Go
-// Available at https://github.com/bwmarrin/discordgo
+// Available at https://github.com/rxzsu/discordgo
 
 // Copyright 2015-2016 Bruce Marriner <bruce@sqls.net>.  All rights reserved.
 // Use of this source code is governed by a BSD-style
@@ -17,8 +17,6 @@ import (
 	"net/http"
 	"runtime"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 // VERSION of DiscordGo, follows Semantic Versioning. (http://semver.org/)
@@ -44,8 +42,8 @@ func New(token string) (s *Session, err error) {
 		ShardCount:                         1,
 		MaxRestRetries:                     3,
 		Client:                             &http.Client{Timeout: (20 * time.Second)},
-		Dialer:                             websocket.DefaultDialer,
-		UserAgent:                          "DiscordBot (https://github.com/bwmarrin/discordgo, v" + VERSION + ")",
+		DialTimeout:                        10 * time.Second,
+		UserAgent:                          "DiscordBot (https://github.com/rxzsu/discordgo, v" + VERSION + ")",
 		sequence:                           new(int64),
 		LastHeartbeatAck:                   time.Now().UTC(),
 	}

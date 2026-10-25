@@ -1,19 +1,21 @@
+version: "2"
+
 linters:
-  disable-all: true
+  default: none
   enable:
-    # - staticcheck
-    # - unused
-    - golint
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+  settings:
+    staticcheck:
+      checks:
+        - all
+        - -ST1000 # package comments: upstream files keep legacy comments
+        - -ST1003 # upstream naming (e.g. Id fields) is kept for API compatibility
+        - -ST1005 # error strings keep upstream capitalization
 
-linters-settings:
-  staticcheck:
-    go: "1.13"
-
-    checks: ["all"]
-
-  unused:
-    go: "1.13"
-
-issues:
-  include:
-    - EXC0002
+formatters:
+  enable:
+    - gofmt
