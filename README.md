@@ -1,6 +1,6 @@
 # DiscordGo (fork)
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/rxzsu/discordgo.svg)](https://pkg.go.dev/github.com/rxzsu/discordgo) [![Go Report Card](https://goreportcard.com/badge/github.com/rxzsu/discordgo)](https://goreportcard.com/report/github.com/rxzsu/discordgo)
+[![CI](https://github.com/rxzsu/discordgo/actions/workflows/ci.yml/badge.svg)](https://github.com/rxzsu/discordgo/actions/workflows/ci.yml) [![Go Reference](https://pkg.go.dev/badge/github.com/rxzsu/discordgo.svg)](https://pkg.go.dev/github.com/rxzsu/discordgo) [![Go Report Card](https://goreportcard.com/badge/github.com/rxzsu/discordgo)](https://goreportcard.com/report/github.com/rxzsu/discordgo)
 
 <img align="right" alt="DiscordGo logo" src="docs/img/discordgo.svg" width="400">
 
