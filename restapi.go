@@ -243,7 +243,7 @@ func (s *Session) RequestWithLockedBucket(method, urlStr, contentType string, b 
 
 	req, err := http.NewRequest(method, urlStr, bytes.NewBuffer(b))
 	if err != nil {
-		bucket.Release(nil)
+		_ = bucket.Release(nil)
 		return
 	}
 
@@ -276,7 +276,7 @@ func (s *Session) RequestWithLockedBucket(method, urlStr, contentType string, b 
 
 	resp, err := cfg.Client.Do(req)
 	if err != nil {
-		bucket.Release(nil)
+		_ = bucket.Release(nil)
 		return
 	}
 	defer func() {
@@ -1668,7 +1668,9 @@ func (s *Session) GuildTemplateCreate(guildID string, data *GuildTemplateParams,
 		return
 	}
 
-	err = unmarshal(body, &st)
+	if uerr := unmarshal(body, &st); uerr != nil {
+		st = nil
+	}
 	return
 }
 
@@ -2675,7 +2677,7 @@ func (s *Session) WebhookMessageDelete(webhookID, token, messageID string, optio
 func (s *Session) MessageReactionAdd(channelID, messageID, emojiID string, options ...RequestOption) error {
 
 	// emoji such as  #⃣ need to have # escaped
-	emojiID = strings.Replace(emojiID, "#", "%23", -1)
+	emojiID = strings.ReplaceAll(emojiID, "#", "%23")
 	_, err := s.RequestWithBucketID("PUT", EndpointMessageReaction(channelID, messageID, emojiID, "@me"), nil, EndpointMessageReaction(channelID, "", "", ""), options...)
 
 	return err
@@ -2689,7 +2691,7 @@ func (s *Session) MessageReactionAdd(channelID, messageID, emojiID string, optio
 func (s *Session) MessageReactionRemove(channelID, messageID, emojiID, userID string, options ...RequestOption) error {
 
 	// emoji such as  #⃣ need to have # escaped
-	emojiID = strings.Replace(emojiID, "#", "%23", -1)
+	emojiID = strings.ReplaceAll(emojiID, "#", "%23")
 	_, err := s.RequestWithBucketID("DELETE", EndpointMessageReaction(channelID, messageID, emojiID, userID), nil, EndpointMessageReaction(channelID, "", "", ""), options...)
 
 	return err
@@ -2712,7 +2714,7 @@ func (s *Session) MessageReactionsRemoveAll(channelID, messageID string, options
 func (s *Session) MessageReactionsRemoveEmoji(channelID, messageID, emojiID string, options ...RequestOption) error {
 
 	// emoji such as  #⃣ need to have # escaped
-	emojiID = strings.Replace(emojiID, "#", "%23", -1)
+	emojiID = strings.ReplaceAll(emojiID, "#", "%23")
 	_, err := s.RequestWithBucketID("DELETE", EndpointMessageReactions(channelID, messageID, emojiID), nil, EndpointMessageReactions(channelID, messageID, emojiID), options...)
 
 	return err
@@ -2727,7 +2729,7 @@ func (s *Session) MessageReactionsRemoveEmoji(channelID, messageID, emojiID stri
 // afterID   : If provided all reactions returned will be after given ID.
 func (s *Session) MessageReactions(channelID, messageID, emojiID string, limit int, beforeID, afterID string, options ...RequestOption) (st []*User, err error) {
 	// emoji such as  #⃣ need to have # escaped
-	emojiID = strings.Replace(emojiID, "#", "%23", -1)
+	emojiID = strings.ReplaceAll(emojiID, "#", "%23")
 	uri := EndpointMessageReactions(channelID, messageID, emojiID)
 
 	v := url.Values{}
@@ -3749,7 +3751,7 @@ func (s *Session) Entitlements(appID string, filterOptions *EntitlementFilterOpt
 		if filterOptions.UserID != "" {
 			queryParams.Set("user_id", filterOptions.UserID)
 		}
-		if filterOptions.SkuIDs != nil && len(filterOptions.SkuIDs) > 0 {
+		if len(filterOptions.SkuIDs) > 0 {
 			queryParams.Set("sku_ids", strings.Join(filterOptions.SkuIDs, ","))
 		}
 		if filterOptions.Before != nil {

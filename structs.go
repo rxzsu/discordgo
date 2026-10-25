@@ -79,7 +79,7 @@ type Session struct {
 
 	// Status stores the current status of the websocket connection
 	// this is being tested, may stay, may go away.
-	status int32
+	status int32 //nolint:unused // kept for parity with the Discord API payload
 
 	// Whether the Voice Websocket is ready
 	VoiceReady bool // NOTE: Deprecated.

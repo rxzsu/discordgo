@@ -15,6 +15,15 @@ linters:
         - -ST1000 # package comments: upstream files keep legacy comments
         - -ST1003 # upstream naming (e.g. Id fields) is kept for API compatibility
         - -ST1005 # error strings keep upstream capitalization
+        - -QF*    # quickfix suggestions: keep upstream code shape
+
+  exclusions:
+    rules:
+      # Upstream examples and tests routinely ignore returned errors
+      # (deferred Close, best-effort cleanup); keep the code as-is.
+      - path: (_test\.go|examples/)
+        linters:
+          - errcheck
 
 formatters:
   enable:

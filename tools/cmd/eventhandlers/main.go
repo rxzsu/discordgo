@@ -5,8 +5,8 @@ import (
 	"go/format"
 	"go/parser"
 	"go/token"
-	"io/ioutil"
 	"log"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -82,7 +82,7 @@ func main() {
 		names = append(names, object)
 	}
 	sort.Strings(names)
-	eventHandlerTmpl.Execute(&buf, names)
+	_ = eventHandlerTmpl.Execute(&buf, names)
 
 	src, err := format.Source(buf.Bytes())
 	if err != nil {
@@ -90,7 +90,7 @@ func main() {
 		src = buf.Bytes()
 	}
 
-	err = ioutil.WriteFile(filepath.Join(dir, strings.ToLower("eventhandlers.go")), src, 0644)
+	err = os.WriteFile(filepath.Join(dir, strings.ToLower("eventhandlers.go")), src, 0644)
 	if err != nil {
 		log.Fatal(buf, "writing output: %s", err)
 	}

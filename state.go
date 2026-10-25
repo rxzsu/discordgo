@@ -177,8 +177,9 @@ func (s *State) GuildRemove(guild *Guild) error {
 
 // Guild gets a guild by ID.
 // Useful for querying if @me is in a guild:
-//    _, err := discordgo.Session.State.Guild(guildID)
-//	  isInGuild := err == nil
+//
+//	   _, err := discordgo.Session.State.Guild(guildID)
+//		  isInGuild := err == nil
 func (s *State) Guild(guildID string) (*Guild, error) {
 	if s == nil {
 		return nil, ErrNilState
@@ -1020,7 +1021,7 @@ func (s *State) OnInterface(se *Session, i interface{}) (err error) {
 				t.BeforeDelete = &oldCopy
 			}
 
-			err = s.MemberRemove(t.Member)
+			_ = s.MemberRemove(t.Member)
 		}
 	case *GuildMembersChunk:
 		if s.TrackMembers {
@@ -1037,7 +1038,7 @@ func (s *State) OnInterface(se *Session, i interface{}) (err error) {
 		}
 	case *GuildRoleCreate:
 		if s.TrackRoles {
-			err = s.RoleAdd(t.GuildID, t.Role)
+			_ = s.RoleAdd(t.GuildID, t.Role)
 		}
 	case *GuildRoleUpdate:
 		if s.TrackRoles {
@@ -1047,7 +1048,7 @@ func (s *State) OnInterface(se *Session, i interface{}) (err error) {
 				t.BeforeUpdate = &oldCopy
 			}
 
-			err = s.RoleAdd(t.GuildID, t.Role)
+			_ = s.RoleAdd(t.GuildID, t.Role)
 		}
 	case *GuildRoleDelete:
 		if s.TrackRoles {
@@ -1057,14 +1058,14 @@ func (s *State) OnInterface(se *Session, i interface{}) (err error) {
 				t.BeforeDelete = &oldCopy
 			}
 
-			err = s.RoleRemove(t.GuildID, t.RoleID)
+			_ = s.RoleRemove(t.GuildID, t.RoleID)
 		}
 	case *GuildEmojisUpdate:
 		if s.TrackEmojis {
 			var guild *Guild
-			guild, err = s.Guild(t.GuildID)
-			if err != nil {
-				return err
+			guild, gerr := s.Guild(t.GuildID)
+			if gerr != nil {
+				return gerr
 			}
 			s.Lock()
 			defer s.Unlock()
@@ -1073,9 +1074,9 @@ func (s *State) OnInterface(se *Session, i interface{}) (err error) {
 	case *GuildStickersUpdate:
 		if s.TrackStickers {
 			var guild *Guild
-			guild, err = s.Guild(t.GuildID)
-			if err != nil {
-				return err
+			guild, gerr := s.Guild(t.GuildID)
+			if gerr != nil {
+				return gerr
 			}
 			s.Lock()
 			defer s.Unlock()
@@ -1083,7 +1084,7 @@ func (s *State) OnInterface(se *Session, i interface{}) (err error) {
 		}
 	case *ChannelCreate:
 		if s.TrackChannels {
-			err = s.ChannelAdd(t.Channel)
+			_ = s.ChannelAdd(t.Channel)
 		}
 	case *ChannelUpdate:
 		if s.TrackChannels {
@@ -1092,7 +1093,7 @@ func (s *State) OnInterface(se *Session, i interface{}) (err error) {
 				oldCopy := *old
 				t.BeforeUpdate = &oldCopy
 			}
-			err = s.ChannelAdd(t.Channel)
+			_ = s.ChannelAdd(t.Channel)
 		}
 	case *ChannelDelete:
 		if s.TrackChannels {
@@ -1101,11 +1102,11 @@ func (s *State) OnInterface(se *Session, i interface{}) (err error) {
 				oldCopy := *old
 				t.BeforeDelete = &oldCopy
 			}
-			err = s.ChannelRemove(t.Channel)
+			_ = s.ChannelRemove(t.Channel)
 		}
 	case *ThreadCreate:
 		if s.TrackThreads {
-			err = s.ChannelAdd(t.Channel)
+			_ = s.ChannelAdd(t.Channel)
 		}
 	case *ThreadUpdate:
 		if s.TrackThreads {
@@ -1114,7 +1115,7 @@ func (s *State) OnInterface(se *Session, i interface{}) (err error) {
 				oldCopy := *old
 				t.BeforeUpdate = &oldCopy
 			}
-			err = s.ChannelAdd(t.Channel)
+			_ = s.ChannelAdd(t.Channel)
 		}
 	case *ThreadDelete:
 		if s.TrackThreads {
@@ -1123,7 +1124,7 @@ func (s *State) OnInterface(se *Session, i interface{}) (err error) {
 				oldCopy := *old
 				t.BeforeDelete = &oldCopy
 			}
-			err = s.ChannelRemove(t.Channel)
+			_ = s.ChannelRemove(t.Channel)
 		}
 	case *ThreadMemberUpdate:
 		if s.TrackThreads {
@@ -1166,7 +1167,7 @@ func (s *State) OnInterface(se *Session, i interface{}) (err error) {
 	case *MessageDeleteBulk:
 		if s.MaxMessageCount != 0 {
 			for _, mID := range t.Messages {
-				s.messageRemoveByID(t.ChannelID, mID)
+				_ = s.messageRemoveByID(t.ChannelID, mID)
 			}
 		}
 	case *VoiceStateUpdate:
@@ -1182,7 +1183,7 @@ func (s *State) OnInterface(se *Session, i interface{}) (err error) {
 		}
 	case *PresenceUpdate:
 		if s.TrackPresences {
-			s.PresenceAdd(t.GuildID, &t.Presence)
+			_ = s.PresenceAdd(t.GuildID, &t.Presence)
 		}
 		if s.TrackMembers {
 			if t.Status == StatusOffline {

@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/rxzsu/discordgo"
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v3/pkg/media"
 	"github.com/pion/webrtc/v3/pkg/media/oggwriter"
+	"github.com/rxzsu/discordgo"
 )
 
 // Variables used for command line parameters

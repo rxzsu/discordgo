@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"strconv"
 	"time"
@@ -646,12 +645,12 @@ func VerifyInteraction(r *http.Request, key ed25519.PublicKey) bool {
 
 	msg.WriteString(timestamp)
 
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 	var body bytes.Buffer
 
 	// at the end of the function, copy the original body back into the request
 	defer func() {
-		r.Body = ioutil.NopCloser(&body)
+		r.Body = io.NopCloser(&body)
 	}()
 
 	// copy body into buffers
