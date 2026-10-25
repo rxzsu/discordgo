@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -132,5 +133,76 @@ func TestPollVotersUnmarshal(t *testing.T) {
 	}
 	if !strings.Contains(answer.Users[0].ID, "123") {
 		t.Fatalf("unexpected user id: %q", answer.Users[0].ID)
+	}
+}
+
+func TestLockBucketContextCancelled(t *testing.T) {
+	r := NewRatelimiter()
+	b := r.GetBucket("test-bucket")
+	b.Remaining = 0
+	b.reset = time.Now().Add(time.Second)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := r.LockBucketContext(ctx, "test-bucket")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("LockBucketContext should return early on cancel, took %v", elapsed)
+	}
+
+	// The bucket must have been released so it can be locked again.
+	if !b.TryLock() {
+		t.Fatal("bucket was not released after context cancellation")
+	}
+	b.Unlock()
+}
+
+func TestLockBucketContextProceeds(t *testing.T) {
+	r := NewRatelimiter()
+	b, err := r.LockBucketContext(context.Background(), "fresh-bucket")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if b.Remaining != 0 {
+		t.Fatalf("expected Remaining=0 after lock, got %d", b.Remaining)
+	}
+	b.Release(nil)
+}
+
+func TestRateLimiterRemoveAndPrune(t *testing.T) {
+	r := NewRatelimiter()
+	r.GetBucket("remove-me")
+	r.RemoveBucket("remove-me")
+	r.bucketsMuCheckRemoved(t, "remove-me")
+
+	// Fill the map well past the prune threshold with stale buckets;
+	// pruning runs opportunistically once the map reaches 512 entries.
+	for i := 0; i < 1000; i++ {
+		r.GetBucket("expired-" + strconv.Itoa(i))
+	}
+	if len(r.buckets) >= 1000 {
+		t.Fatalf("expected opportunistic pruning to cap bucket growth, got %d", len(r.buckets))
+	}
+
+	// The most recently created bucket must survive pruning.
+	if _, ok := r.buckets["expired-999"]; !ok {
+		t.Fatal("the most recent bucket must survive pruning")
+	}
+}
+
+// helper keeps the test independent from sync internals of RateLimiter
+func (r *RateLimiter) bucketsMuCheckRemoved(t *testing.T, key string) {
+	t.Helper()
+	r.Lock()
+	defer r.Unlock()
+	if _, ok := r.buckets[key]; ok {
+		t.Fatalf("bucket %q should have been removed", key)
 	}
 }

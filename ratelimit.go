@@ -1,6 +1,7 @@
 package discordgo
 
 import (
+	"context"
 	"math"
 	"net/http"
 	"strconv"
@@ -51,6 +52,12 @@ func (r *RateLimiter) GetBucket(key string) *Bucket {
 		return bucket
 	}
 
+	// Opportunistically prune stale buckets so the map does not grow
+	// without bound over a long-lived session.
+	if len(r.buckets) >= maxBucketsBeforePrune {
+		r.pruneBucketsLocked()
+	}
+
 	b := &Bucket{
 		Remaining: 1,
 		Key:       key,
@@ -67,6 +74,38 @@ func (r *RateLimiter) GetBucket(key string) *Bucket {
 
 	r.buckets[key] = b
 	return b
+}
+
+// maxBucketsBeforePrune is the bucket map size that triggers opportunistic
+// pruning of expired buckets in GetBucket.
+const maxBucketsBeforePrune = 512
+
+// pruneBucketsLocked removes buckets whose rate limit window has certainly
+// passed and which are not currently in use. It must be called with r's lock
+// held.
+func (r *RateLimiter) pruneBucketsLocked() {
+	now := time.Now()
+	for key, b := range r.buckets {
+		// Skip buckets that are locked (in use) by an in-flight request.
+		if !b.TryLock() {
+			continue
+		}
+		expired := (b.reset.IsZero() || b.reset.Before(now)) && b.customRateLimit == nil
+		if expired {
+			delete(r.buckets, key)
+		}
+		b.Unlock()
+	}
+}
+
+// RemoveBucket removes a bucket from the rate limiter, forcing the next
+// request to its endpoint to start with a fresh (optimistic) limit. This is
+// mostly useful for tests and for sessions that hit thousands of distinct
+// endpoints.
+func (r *RateLimiter) RemoveBucket(key string) {
+	r.Lock()
+	defer r.Unlock()
+	delete(r.buckets, key)
 }
 
 // GetWaitTime returns the duration you should wait for a Bucket
@@ -101,6 +140,28 @@ func (r *RateLimiter) LockBucketObject(b *Bucket) *Bucket {
 
 	b.Remaining--
 	return b
+}
+
+// LockBucketContext locks a bucket until a request can be made, waiting out
+// the rate limit in a context-aware manner: if ctx is done first, the bucket
+// is released and the context error is returned.
+func (r *RateLimiter) LockBucketContext(ctx context.Context, bucketID string) (*Bucket, error) {
+	return r.LockBucketObjectContext(ctx, r.GetBucket(bucketID))
+}
+
+// LockBucketObjectContext is LockBucketObject with context-aware waiting.
+func (r *RateLimiter) LockBucketObjectContext(ctx context.Context, b *Bucket) (*Bucket, error) {
+	b.Lock()
+
+	if wait := r.GetWaitTime(b, 1); wait > 0 {
+		if err := sleepCtx(ctx, wait); err != nil {
+			b.Unlock()
+			return nil, err
+		}
+	}
+
+	b.Remaining--
+	return b, nil
 }
 
 // Bucket represents a ratelimit bucket, each bucket gets ratelimited individually (-global ratelimits)

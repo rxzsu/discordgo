@@ -3800,6 +3800,17 @@ func (s *Session) EntitlementTestDelete(appID, entitlementID string, options ...
 	return
 }
 
+// EntitlementDelete deletes a non-consumed entitlement. This is only usable
+// with test entitlements created via EntitlementTestCreate; consumed or
+// real (purchased) entitlements cannot be deleted.
+//
+//	appID          : The ID of the application.
+//	entitlementID  : The ID of the entitlement to delete.
+func (s *Session) EntitlementDelete(appID, entitlementID string, options ...RequestOption) (err error) {
+	_, err = s.RequestWithBucketID("DELETE", EndpointEntitlement(appID, entitlementID), nil, EndpointEntitlement(appID, ""), options...)
+	return
+}
+
 // Subscriptions returns all subscriptions containing the SKU.
 // skuID : The ID of the SKU.
 // userID : User ID for which to return subscriptions. Required except for OAuth queries.

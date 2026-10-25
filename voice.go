@@ -963,6 +963,16 @@ func (v *VoiceConnection) reconnect() {
 	wait := time.Duration(1)
 	for {
 
+		// Stop reconnecting if this voice connection was removed from the
+		// session (e.g. by a manual Disconnect()) while the loop was running.
+		v.session.RLock()
+		registeredConn := v.session.VoiceConnections[v.GuildID]
+		v.session.RUnlock()
+		if registeredConn != v {
+			v.log(LogInformational, "voice connection for guild %s is no longer registered, stopping reconnect", v.GuildID)
+			return
+		}
+
 		<-time.After(wait * time.Second)
 		wait *= 2
 		if wait > 600 {
