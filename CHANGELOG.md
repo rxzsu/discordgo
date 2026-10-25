@@ -4,7 +4,37 @@ All notable changes in this fork relative to upstream
 [bwmarrin/discordgo](https://github.com/bwmarrin/discordgo) are documented
 here.
 
-## Unreleased
+## v1.0.0-rc.1
+
+### Added
+- v1 roadmap and stability promise in README.
+
+### Changed
+- `VERSION` now reflects fork versioning (`1.0.0-rc.1`, was upstream's
+  `0.29.0`).
+- Deprecation audit: `UserAvatar`, `GuildMemberEditComplex`,
+  `ChannelEditComplex`, `ChannelFileSendWithMessage`,
+  `RequestGuildMembersBatch(List)`, `IntentsGuildBans`,
+  `MessageFlagsSupressEmbeds` now carry proper `// Deprecated:` godoc
+  markers. Internal call sites no longer route through deprecated APIs.
+- `go generate` output for `eventhandlers.go` verified byte-identical
+  with the committed file.
+
+### Removed
+- Dead `EndpointOauth2*` aliases (unused, marked "remove in the next
+  release" upstream).
+
+## v0.30.1
+
+### Fixed
+- RTP timestamp overflow handling in the voice `opusSender` (the old
+  wrap check was dead code; long voice sessions could corrupt the RTP
+  timestamp after ~13 hours).
+- Full golangci-lint pass (0 issues): errcheck findings, deprecated
+  `io/ioutil`, ineffectual assignments, style modernization.
+- CI green (Go 1.26/1.27 matrix, `go test -race`, golangci-lint).
+
+## v0.30.0
 
 ### Added
 - Go 1.27 toolchain (`go.mod` was still on 1.13).

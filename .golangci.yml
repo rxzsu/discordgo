@@ -24,6 +24,11 @@ linters:
       - path: (_test\.go|examples/)
         linters:
           - errcheck
+      # Examples may demonstrate APIs that are deprecated but not removed.
+      - path: examples/
+        linters:
+          - staticcheck
+        text: "SA1019"
 
 formatters:
   enable:

@@ -469,7 +469,13 @@ type requestGuildMembersOp struct {
 // nonce     : Nonce to identify the Guild Members Chunk response
 // presences : Whether to request presences of guild members
 func (s *Session) RequestGuildMembers(guildID, query string, limit int, nonce string, presences bool) error {
-	return s.RequestGuildMembersBatch([]string{guildID}, query, limit, nonce, presences)
+	return s.requestGuildMembers(requestGuildMembersData{
+		GuildIDs:  []string{guildID},
+		Query:     &query,
+		Limit:     limit,
+		Nonce:     nonce,
+		Presences: presences,
+	})
 }
 
 // RequestGuildMembersList requests guild members from the gateway
@@ -480,7 +486,13 @@ func (s *Session) RequestGuildMembers(guildID, query string, limit int, nonce st
 // nonce     : Nonce to identify the Guild Members Chunk response
 // presences : Whether to request presences of guild members
 func (s *Session) RequestGuildMembersList(guildID string, userIDs []string, limit int, nonce string, presences bool) error {
-	return s.RequestGuildMembersBatchList([]string{guildID}, userIDs, limit, nonce, presences)
+	return s.requestGuildMembers(requestGuildMembersData{
+		GuildIDs:  []string{guildID},
+		UserIDs:   &userIDs,
+		Limit:     limit,
+		Nonce:     nonce,
+		Presences: presences,
+	})
 }
 
 // RequestGuildMembersBatch requests guild members from the gateway
@@ -491,7 +503,7 @@ func (s *Session) RequestGuildMembersList(guildID string, userIDs []string, limi
 // nonce     : Nonce to identify the Guild Members Chunk response
 // presences : Whether to request presences of guild members
 //
-// NOTE: this function is deprecated, please use RequestGuildMembers instead
+// Deprecated: use RequestGuildMembers instead.
 func (s *Session) RequestGuildMembersBatch(guildIDs []string, query string, limit int, nonce string, presences bool) (err error) {
 	data := requestGuildMembersData{
 		GuildIDs:  guildIDs,
@@ -512,7 +524,7 @@ func (s *Session) RequestGuildMembersBatch(guildIDs []string, query string, limi
 // nonce     : Nonce to identify the Guild Members Chunk response
 // presences : Whether to request presences of guild members
 //
-// NOTE: this function is deprecated, please use RequestGuildMembersList instead
+// Deprecated: use RequestGuildMembersList instead.
 func (s *Session) RequestGuildMembersBatchList(guildIDs []string, userIDs []string, limit int, nonce string, presences bool) (err error) {
 	data := requestGuildMembersData{
 		GuildIDs:  guildIDs,

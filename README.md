@@ -79,6 +79,30 @@ source with [Godoc](https://godoc.org):
 
 The examples in [examples/](examples/) demonstrate the most common features.
 
+## Roadmap to v1.0
+
+The fork is currently at **v1.0.0-rc.1**. Final v1.0.0 ships once the
+following are complete:
+
+- [x] Modern toolchain (Go 1.27) and maintained websocket dependency
+- [x] Context-aware REST core (rate limit waits and retries respect
+      cancellation); `WithContext`/`WithTimeout`/`WithQuery` are the
+      official way to scope requests — the fork will **not** duplicate
+      every REST method with a `*Context` variant
+- [x] CI (build/vet/test -race on two Go versions, golangci-lint at
+      0 issues)
+- [x] Reproducible `go generate` for `eventhandlers.go` (verified
+      byte-identical)
+- [x] Deprecation audit: legacy APIs carry proper `// Deprecated:`
+      godoc markers; dead aliases removed
+- [ ] One release cycle (≈1 month) without breaking API changes
+- [ ] Upstream sync check before final tag
+
+### Stability promise (from v1.0.0 onward)
+
+Semantic versioning: breaking API changes only in major versions,
+deprecations get at least one minor release of overlap before removal.
+
 ## Keeping up with upstream
 
 To pull in the latest upstream changes:

@@ -390,7 +390,7 @@ func (s *Session) User(userID string, options ...RequestOption) (st *User, err e
 	return
 }
 
-// UserAvatar is deprecated. Please use UserAvatarDecode
+// Deprecated: Use UserAvatarDecode instead.
 // userID    : A user ID or "@me" which is a shortcut of current user ID
 func (s *Session) UserAvatar(userID string, options ...RequestOption) (img image.Image, err error) {
 	u, err := s.User(userID, options...)
@@ -962,7 +962,8 @@ func (s *Session) GuildMemberEdit(guildID, userID string, data *GuildMemberParam
 }
 
 // GuildMemberEditComplex edits the nickname and roles of a member.
-// NOTE: deprecated, use GuildMemberEdit instead.
+//
+// Deprecated: use GuildMemberEdit instead.
 //
 // guildID  : The ID of a Guild.
 // userID   : The ID of a User.
@@ -1738,7 +1739,8 @@ func (s *Session) ChannelEdit(channelID string, data *ChannelEdit, options ...Re
 }
 
 // ChannelEditComplex edits an existing channel, replacing the parameters entirely with ChannelEdit struct
-// NOTE: deprecated, use ChannelEdit instead
+//
+// Deprecated: use ChannelEdit instead.
 // channelID     : The ID of a Channel
 // data          : The channel struct to send
 func (s *Session) ChannelEditComplex(channelID string, data *ChannelEdit, options ...RequestOption) (st *Channel, err error) {
@@ -2107,7 +2109,8 @@ func (s *Session) ChannelFileSend(channelID, name string, r io.Reader, options .
 }
 
 // ChannelFileSendWithMessage sends a file to the given channel with an message.
-// DEPRECATED. Use ChannelMessageSendComplex instead.
+//
+// Deprecated: use ChannelMessageSendComplex instead.
 // channelID : The ID of a Channel.
 // content: Optional Message content.
 // name: The name of the file.

@@ -3045,8 +3045,9 @@ const (
 
 	IntentGuildBans Intent = IntentGuildModeration
 
-	IntentsGuilds                      Intent = 1 << 0
-	IntentsGuildMembers                Intent = 1 << 1
+	IntentsGuilds       Intent = 1 << 0
+	IntentsGuildMembers Intent = 1 << 1
+	// Deprecated: use IntentGuildModeration instead.
 	IntentsGuildBans                   Intent = 1 << 2
 	IntentsGuildEmojis                 Intent = 1 << 3
 	IntentsGuildIntegrations           Intent = 1 << 4
