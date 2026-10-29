@@ -16,7 +16,7 @@ jobs:
         with:
           go-version: ${{ matrix.go-version }}
       - name: Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Build
         run: go build ./...
       - name: Vet
@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
