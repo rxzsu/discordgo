@@ -45,6 +45,11 @@ type VoiceConnection struct {
 	speaking     bool
 	reconnecting bool // If true, voice connection is trying to reconnect
 
+	// LastVoiceHeartbeatSent/Ack track voice websocket heartbeats for
+	// VoiceHeartbeatLatency.
+	LastVoiceHeartbeatSent time.Time
+	LastVoiceHeartbeatAck  time.Time
+
 	OpusSend chan []byte  // Chan for sending opus audio
 	OpusRecv chan *Packet // Chan for receiving opus audio
 
@@ -470,8 +475,9 @@ func (v *VoiceConnection) onEvent(message []byte) {
 		return
 
 	case 3: // HEARTBEAT response
-		// add code to use this to track latency?
-		// TODO: maybe actually implement this, seems cool
+		v.Lock()
+		v.LastVoiceHeartbeatAck = time.Now().UTC()
+		v.Unlock()
 		return
 
 	case 4: // udp encryption secret key
@@ -533,6 +539,7 @@ func (v *VoiceConnection) wsHeartbeat(wsConn *websocket.Conn, close <-chan struc
 	for {
 		v.log(LogDebug, "sending heartbeat packet")
 		v.wsMutex.Lock()
+		v.LastVoiceHeartbeatSent = time.Now().UTC()
 		err = wsjson.Write(context.Background(), wsConn, voiceHeartbeatOp{3, int(time.Now().Unix())})
 		v.wsMutex.Unlock()
 		if err != nil {
@@ -547,6 +554,18 @@ func (v *VoiceConnection) wsHeartbeat(wsConn *websocket.Conn, close <-chan struc
 			return
 		}
 	}
+}
+
+// VoiceHeartbeatLatency returns the latency between the last voice
+// websocket heartbeat acknowledgement and the heartbeat send. It returns
+// the zero time.Duration before the first heartbeat exchange.
+func (v *VoiceConnection) VoiceHeartbeatLatency() time.Duration {
+	v.RLock()
+	defer v.RUnlock()
+	if v.LastVoiceHeartbeatAck.IsZero() {
+		return 0
+	}
+	return v.LastVoiceHeartbeatAck.Sub(v.LastVoiceHeartbeatSent)
 }
 
 // ------------------------------------------------------------------------------------------------

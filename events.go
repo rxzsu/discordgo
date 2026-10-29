@@ -134,6 +134,22 @@ type GuildDelete struct {
 	BeforeDelete *Guild `json:"-"`
 }
 
+// GuildSoundboardSoundCreate is the data for a GuildSoundboardSoundCreate event.
+type GuildSoundboardSoundCreate struct {
+	*SoundboardSound
+}
+
+// GuildSoundboardSoundUpdate is the data for a GuildSoundboardSoundUpdate event.
+type GuildSoundboardSoundUpdate struct {
+	*SoundboardSound
+}
+
+// GuildSoundboardSoundDelete is the data for a GuildSoundboardSoundDelete event.
+type GuildSoundboardSoundDelete struct {
+	SoundID string `json:"sound_id"`
+	GuildID string `json:"guild_id"`
+}
+
 // GuildBanAdd is the data for a GuildBanAdd event.
 type GuildBanAdd struct {
 	User    *User  `json:"user"`

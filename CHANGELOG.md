@@ -4,6 +4,26 @@ All notable changes in this fork relative to upstream
 [bwmarrin/discordgo](https://github.com/bwmarrin/discordgo) are documented
 here.
 
+## v1.0.0-rc.3
+
+### Added
+- Full REST coverage of APIs whose endpoints existed but had no methods
+  (found by an automated endpoint-coverage audit):
+  - Stickers: `NitroStickerPacks`, `GuildStickers`, `GuildSticker`,
+    `GuildStickerCreate` (multipart upload), `GuildStickerEdit`,
+    `GuildStickerDelete`.
+  - Guild widget: `GuildWidget`, `GuildWidgetEdit`.
+  - Soundboard: `GuildSoundboardSounds`, `GuildSoundboardSound`,
+    `GuildSoundboardSoundCreate` (multipart upload),
+    `GuildSoundboardSoundEdit`, `GuildSoundboardSoundDelete`,
+    `ChannelSoundboardSoundSend`, plus the
+    `GuildSoundboardSoundCreate/Update/Delete` gateway events.
+
+### Changed
+- Voice: heartbeat ACKs are now tracked; new
+  `VoiceConnection.VoiceHeartbeatLatency()` (previously the OP3 response
+  handler was an empty TODO).
+
 ## v1.0.0-rc.2
 
 ### Added

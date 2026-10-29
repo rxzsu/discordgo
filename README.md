@@ -32,6 +32,8 @@ differences from upstream.
   shared handlers, automatic shard count/identify-delay discovery —
   upstream has none. See `examples/sharding`.
 - **`GuildBulkBan`**: ban up to 200 users in a single API call.
+- **Stickers, guild widget, soundboard**: full REST coverage of APIs
+  that upstream defined endpoints for but never implemented methods for.
 
 ### Breaking changes vs upstream
 

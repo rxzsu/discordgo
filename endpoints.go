@@ -83,6 +83,10 @@ var (
 	EndpointGuildBans                = func(gID string) string { return EndpointGuilds + gID + "/bans" }
 	EndpointGuildBan                 = func(gID, uID string) string { return EndpointGuilds + gID + "/bans/" + uID }
 	EndpointGuildBulkBan             = func(gID string) string { return EndpointGuilds + gID + "/bulk-ban" }
+	EndpointGuildWidgetJSON          = func(gID string) string { return EndpointGuilds + gID + "/widget.json" }
+	EndpointGuildSoundboardSounds    = func(gID string) string { return EndpointGuilds + gID + "/soundboard-sounds" }
+	EndpointGuildSoundboardSound     = func(gID, sID string) string { return EndpointGuildSoundboardSounds(gID) + "/" + sID }
+	EndpointChannelSendSoundboard    = func(cID string) string { return EndpointChannel(cID) + "/send-soundboard-sound" }
 	EndpointGuildIntegrations        = func(gID string) string { return EndpointGuilds + gID + "/integrations" }
 	EndpointGuildIntegration         = func(gID, iID string) string { return EndpointGuilds + gID + "/integrations/" + iID }
 	EndpointGuildRoles               = func(gID string) string { return EndpointGuilds + gID + "/roles" }

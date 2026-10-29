@@ -2204,6 +2204,55 @@ type GuildBulkBanResponse struct {
 	FailedUserIDs []string `json:"failed_user_ids"`
 }
 
+// SoundboardSound represents a soundboard sound of a guild.
+// https://discord.com/developers/docs/resources/soundboard#soundboard-sound-object
+type SoundboardSound struct {
+	ID        string  `json:"id"`
+	Name      string  `json:"name"`
+	Volume    float64 `json:"volume"`
+	EmojiID   string  `json:"emoji_id"`
+	EmojiName string  `json:"emoji_name"`
+	GuildID   string  `json:"guild_id"`
+	Available bool    `json:"available"`
+	User      *User   `json:"user"`
+}
+
+// GuildWidget represents a guild embed (widget) configuration and state.
+// https://discord.com/developers/docs/resources/guild#guild-widget-object
+type GuildWidget struct {
+	Enabled   bool   `json:"enabled"`
+	ChannelID string `json:"channel_id"`
+	GuildID   string `json:"id"`
+	Name      string `json:"name"`
+	InviteURL string `json:"instant_invite"`
+	Channels  []struct {
+		ID       string `json:"id"`
+		Name     string `json:"name"`
+		Position int    `json:"position"`
+	} `json:"channels"`
+	Members []struct {
+		ID       string `json:"id"`
+		Username string `json:"username"`
+		Avatar   string `json:"avatar"`
+		Status   string `json:"status"`
+	} `json:"members"`
+	PresenceCount int `json:"presence_count"`
+}
+
+// GuildWidgetEditParams are the parameters for GuildWidgetEdit.
+type GuildWidgetEditParams struct {
+	Enabled   *bool   `json:"enabled,omitempty"`
+	ChannelID *string `json:"channel_id,omitempty"`
+}
+
+// StickerParams are the parameters for GuildStickerCreate and
+// GuildStickerEdit.
+type StickerParams struct {
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description,omitempty"`
+	Tags        string `json:"tags,omitempty"`
+}
+
 // GatewayBotResponse stores the data for the gateway/bot response
 type GatewayBotResponse struct {
 	URL               string             `json:"url"`

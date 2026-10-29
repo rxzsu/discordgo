@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -325,6 +326,8 @@ func TestGuildBulkBan(t *testing.T) {
 	s.Client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		r.URL.Scheme = "http"
 		r.URL.Host = redirectHost
+		// Discord paths carry the /api/vN prefix; the test mux has none.
+		r.URL.Path = regexp.MustCompile("^/api/v[0-9]+").ReplaceAllString(r.URL.Path, "")
 		return http.DefaultTransport.RoundTrip(r)
 	})}
 	resp, err := s.GuildBulkBan("guild-id", []string{"1", "2", "3"}, 0)
@@ -336,5 +339,104 @@ func TestGuildBulkBan(t *testing.T) {
 	}
 	if len(resp.FailedUserIDs) != 1 || resp.FailedUserIDs[0] != "3" {
 		t.Fatalf("unexpected failed users: %v", resp.FailedUserIDs)
+	}
+}
+
+func TestStickersWidgetSoundboardAPI(t *testing.T) {
+	var createUploadContentType string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/stickers/", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"sticker_packs":[{"id":"1","name":"pack"}]}`))
+	})
+	mux.HandleFunc("/guilds/g1/stickers", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case "GET":
+			_, _ = w.Write([]byte(`[{"id":"s1","name":"sticker","format_type":1}]`))
+		case "POST":
+			createUploadContentType = r.Header.Get("Content-Type")
+			_, _ = w.Write([]byte(`{"id":"s1","name":"new"}`))
+		}
+	})
+	mux.HandleFunc("/guilds/g1/stickers/s1", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"s1","name":"edited"}`))
+	})
+	mux.HandleFunc("/guilds/g1/widget.json", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "PATCH" {
+			_, _ = w.Write([]byte(`{"enabled":true,"channel_id":"c1"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"g1","name":"guild","presence_count":7}`))
+	})
+	mux.HandleFunc("/guilds/g1/soundboard-sounds", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			_, _ = w.Write([]byte(`{"items":[{"id":"snd1","name":"sound","volume":0.5}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"snd1","name":"created"}`))
+	})
+	mux.HandleFunc("/channels/c1/send-soundboard-sound", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	redirectHost = srv.Listener.Addr().String()
+
+	s, _ := New("Bot test-token")
+	s.Client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		r.URL.Scheme = "http"
+		r.URL.Host = redirectHost
+		// Discord paths carry the /api/vN prefix; the test mux has none.
+		r.URL.Path = regexp.MustCompile("^/api/v[0-9]+").ReplaceAllString(r.URL.Path, "")
+		return http.DefaultTransport.RoundTrip(r)
+	})}
+
+	packs, err := s.NitroStickerPacks()
+	if err != nil || len(packs) != 1 || packs[0].Name != "pack" {
+		t.Fatalf("NitroStickerPacks: %v %+v", err, packs)
+	}
+
+	stickers, err := s.GuildStickers("g1")
+	if err != nil || len(stickers) != 1 || stickers[0].ID != "s1" {
+		t.Fatalf("GuildStickers: %v %+v", err, stickers)
+	}
+
+	created, err := s.GuildStickerCreate("g1", &StickerParams{Name: "new", Tags: "tag"}, &File{Name: "s.png", Reader: strings.NewReader("pngdata")})
+	if err != nil || created.Name != "new" {
+		t.Fatalf("GuildStickerCreate: %v %+v", err, created)
+	}
+	if !strings.HasPrefix(createUploadContentType, "multipart/form-data") {
+		t.Fatalf("sticker create must be multipart, got %q", createUploadContentType)
+	}
+
+	widget, err := s.GuildWidget("g1")
+	if err != nil || widget.Name != "guild" || widget.PresenceCount != 7 {
+		t.Fatalf("GuildWidget: %v %+v", err, widget)
+	}
+
+	enabled := true
+	wEdits, err := s.GuildWidgetEdit("g1", &GuildWidgetEditParams{Enabled: &enabled})
+	if err != nil || !wEdits.Enabled || wEdits.ChannelID != "c1" {
+		t.Fatalf("GuildWidgetEdit: %v %+v", err, wEdits)
+	}
+
+	sounds, err := s.GuildSoundboardSounds("g1")
+	if err != nil || len(sounds) != 1 || sounds[0].Volume != 0.5 {
+		t.Fatalf("GuildSoundboardSounds: %v %+v", err, sounds)
+	}
+
+	if err := s.ChannelSoundboardSoundSend("c1", "snd1", ""); err != nil {
+		t.Fatalf("ChannelSoundboardSoundSend: %v", err)
+	}
+}
+
+func TestVoiceHeartbeatLatency(t *testing.T) {
+	v := &VoiceConnection{}
+	if lat := v.VoiceHeartbeatLatency(); lat != 0 {
+		t.Fatalf("expected zero latency before first exchange, got %v", lat)
+	}
+	v.LastVoiceHeartbeatSent = time.Now().Add(-50 * time.Millisecond)
+	v.LastVoiceHeartbeatAck = time.Now()
+	if lat := v.VoiceHeartbeatLatency(); lat <= 0 {
+		t.Fatalf("expected positive latency, got %v", lat)
 	}
 }
