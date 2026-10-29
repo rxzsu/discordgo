@@ -70,9 +70,12 @@ func NewState() *State {
 		TrackRoles:         true,
 		TrackVoice:         true,
 		TrackPresences:     true,
-		guildMap:           make(map[string]*Guild),
-		channelMap:         make(map[string]*Channel),
-		memberMap:          make(map[string]map[string]*Member),
+		// Cap the per-channel message cache: 0 would mean "keep
+		// everything", which grows without bound on busy servers.
+		MaxMessageCount: 1000,
+		guildMap:        make(map[string]*Guild),
+		channelMap:      make(map[string]*Channel),
+		memberMap:       make(map[string]map[string]*Member),
 	}
 }
 
@@ -797,7 +800,7 @@ func (s *State) MessageAdd(message *Message) error {
 
 	c.Messages = append(c.Messages, message)
 
-	if len(c.Messages) > s.MaxMessageCount {
+	if s.MaxMessageCount > 0 && len(c.Messages) > s.MaxMessageCount {
 		c.Messages = c.Messages[len(c.Messages)-s.MaxMessageCount:]
 	}
 

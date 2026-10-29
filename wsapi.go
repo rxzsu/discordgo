@@ -609,7 +609,9 @@ func (s *Session) onEvent(messageType int, message []byte) (*Event, error) {
 		return e, err
 	}
 
-	s.log(LogDebug, "Op: %d, Seq: %d, Type: %s, Data: %s\n\n", e.Operation, e.Sequence, e.Type, string(e.RawData))
+	if s.LogLevel >= LogDebug {
+		s.log(LogDebug, "Op: %d, Seq: %d, Type: %s, Data: %s\n\n", e.Operation, e.Sequence, e.Type, string(e.RawData))
+	}
 
 	// Ping request.
 	// Must respond with a heartbeat packet within 5 seconds
@@ -675,7 +677,9 @@ func (s *Session) onEvent(messageType int, message []byte) (*Event, error) {
 	if e.Operation != 0 {
 		// But we probably should be doing something with them.
 		// TEMP
-		s.log(LogWarning, "unknown Op: %d, Seq: %d, Type: %s, Data: %s, message: %s", e.Operation, e.Sequence, e.Type, string(e.RawData), string(message))
+		if s.LogLevel >= LogWarning {
+			s.log(LogWarning, "unknown Op: %d, Seq: %d, Type: %s, Data: %s, message: %s", e.Operation, e.Sequence, e.Type, string(e.RawData), string(message))
+		}
 		return e, nil
 	}
 
@@ -700,7 +704,9 @@ func (s *Session) onEvent(messageType int, message []byte) (*Event, error) {
 		// Either way, READY events must fire, even with errors.
 		s.handleEvent(e.Type, e.Struct)
 	} else {
-		s.log(LogWarning, "unknown event: Op: %d, Seq: %d, Type: %s, Data: %s", e.Operation, e.Sequence, e.Type, string(e.RawData))
+		if s.LogLevel >= LogWarning {
+			s.log(LogWarning, "unknown event: Op: %d, Seq: %d, Type: %s, Data: %s", e.Operation, e.Sequence, e.Type, string(e.RawData))
+		}
 	}
 
 	// For legacy reasons, we send the raw event also, this could be useful for handling unknown events.

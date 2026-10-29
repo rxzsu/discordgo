@@ -427,7 +427,9 @@ func (v *VoiceConnection) wsListen(wsConn *websocket.Conn, close <-chan struct{}
 // wsListen() function.
 func (v *VoiceConnection) onEvent(message []byte) {
 
-	v.log(LogDebug, "received: %s", string(message))
+	if v.LogLevel >= LogDebug {
+		v.log(LogDebug, "received: %s", string(message))
+	}
 
 	var e Event
 	if err := json.Unmarshal(message, &e); err != nil {
@@ -512,7 +514,9 @@ func (v *VoiceConnection) onEvent(message []byte) {
 		}
 
 	default:
-		v.log(LogDebug, "unknown voice operation, %d, %s", e.Operation, string(e.RawData))
+		if v.LogLevel >= LogDebug {
+			v.log(LogDebug, "unknown voice operation, %d, %s", e.Operation, string(e.RawData))
+		}
 	}
 }
 

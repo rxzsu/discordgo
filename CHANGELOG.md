@@ -4,6 +4,25 @@ All notable changes in this fork relative to upstream
 [bwmarrin/discordgo](https://github.com/bwmarrin/discordgo) are documented
 here.
 
+## v1.0.0-rc.4
+
+### Fixed
+- Memory: the default state no longer keeps every message forever.
+  `NewState()` did not set `MaxMessageCount`, so the per-channel cache
+  grew without bound on busy servers; it now defaults to 1000 messages
+  per channel (override via `State.MaxMessageCount`, set a huge value
+  to restore the old behavior).
+
+### Performance
+- Rate limit bucket IDs are computed without allocation
+  (`BucketIDFromURL`): 4.9ns/0 allocs vs 26.6ns/1 alloc for the old
+  `strings.SplitN` approach, on every REST request.
+- Gateway and voice event paths no longer copy the raw payload into a
+  string for debug logging unless debug logging is enabled (previously
+  every received event paid a full payload-sized allocation).
+- Benchmarks added (`bench_test.go`): bucket ID computation, full REST
+  request path, event dispatch, state message add.
+
 ## v1.0.0-rc.3
 
 ### Added

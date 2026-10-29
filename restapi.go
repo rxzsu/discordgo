@@ -207,7 +207,7 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 
 // Request is the same as RequestWithBucketID but the bucket id is the same as the urlStr
 func (s *Session) Request(method, urlStr string, data interface{}, options ...RequestOption) (response []byte, err error) {
-	return s.RequestWithBucketID(method, urlStr, data, strings.SplitN(urlStr, "?", 2)[0], options...)
+	return s.RequestWithBucketID(method, urlStr, data, BucketIDFromURL(urlStr), options...)
 }
 
 // RequestWithBucketID makes a (GET/POST/...) Requests to Discord REST API with JSON data.
@@ -229,7 +229,7 @@ func (s *Session) RequestWithBucketID(method, urlStr string, data interface{}, b
 // retry with sequence+1 until it either succeeds or sequence >= session.MaxRestRetries
 func (s *Session) RequestRaw(method, urlStr, contentType string, b []byte, bucketID string, sequence int, options ...RequestOption) (response []byte, err error) {
 	if bucketID == "" {
-		bucketID = strings.SplitN(urlStr, "?", 2)[0]
+		bucketID = BucketIDFromURL(urlStr)
 	}
 	return s.RequestWithLockedBucket(method, urlStr, contentType, b, s.Ratelimiter.LockBucket(bucketID), sequence, options...)
 }
@@ -362,6 +362,15 @@ func (s *Session) RequestWithLockedBucket(method, urlStr, contentType string, b 
 	}
 
 	return
+}
+
+// BucketIDFromURL returns the rate limit bucket key for a request URL:
+// everything before the query string. It does not allocate.
+func BucketIDFromURL(urlStr string) string {
+	if i := strings.IndexByte(urlStr, '?'); i >= 0 {
+		return urlStr[:i]
+	}
+	return urlStr
 }
 
 func unmarshal(data []byte, v interface{}) error {
