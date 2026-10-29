@@ -206,3 +206,135 @@ func (r *RateLimiter) bucketsMuCheckRemoved(t *testing.T, key string) {
 		t.Fatalf("bucket %q should have been removed", key)
 	}
 }
+
+func TestShardIDForGuild(t *testing.T) {
+	// Snowflake 1300000000000000000 has (id>>22) == 310058; 310058 % 4 == 2.
+	cases := []struct {
+		id    string
+		count int
+		want  int
+	}{
+		// (id>>22) == 2 for 2<<22+2.
+		{"8388610", 4, 2},
+		// (id>>22) == 309936103820 for this snowflake; ...820 % 4 == 0.
+		{"1300000000000000000", 4, 0},
+		{"1300000000000000000", 1, 0},
+		{"0", 16, 0},
+	}
+	for _, c := range cases {
+		got, err := ShardIDForGuild(c.id, c.count)
+		if err != nil {
+			t.Fatalf("ShardIDForGuild(%q, %d): %v", c.id, c.count, err)
+		}
+		if got != c.want {
+			t.Fatalf("ShardIDForGuild(%q, %d) = %d, want %d", c.id, c.count, got, c.want)
+		}
+	}
+
+	if _, err := ShardIDForGuild("123", 0); err != ErrWSShardBounds {
+		t.Fatalf("expected ErrWSShardBounds for zero shard count, got %v", err)
+	}
+	if _, err := ShardIDForGuild("not-a-snowflake", 2); err == nil {
+		t.Fatal("expected error for non-numeric guild ID")
+	}
+}
+
+func TestParseSnowflakeInt64(t *testing.T) {
+	n, err := ParseSnowflakeInt64("1300000000000000000")
+	if err != nil || n != 1300000000000000000 {
+		t.Fatalf("got (%d, %v)", n, err)
+	}
+	for _, bad := range []string{"", "12a3", "-5", "99999999999999999999999"} {
+		if _, err := ParseSnowflakeInt64(bad); err == nil {
+			t.Fatalf("expected error for %q", bad)
+		}
+	}
+}
+
+func TestIdentifyDelayForConcurrency(t *testing.T) {
+	if got := identifyDelayForConcurrency(0); got != DefaultIdentifyDelay {
+		t.Fatalf("concurrency 0 should behave like 1, got %v", got)
+	}
+	if got := identifyDelayForConcurrency(1); got != 5*time.Second {
+		t.Fatalf("got %v", got)
+	}
+	if got := identifyDelayForConcurrency(16); got != 5*time.Second/16 {
+		t.Fatalf("got %v", got)
+	}
+}
+
+func TestShardManagerFanOut(t *testing.T) {
+	m := NewShardManager(ShardingConfig{Token: "Bot test", ShardCount: 3})
+
+	// Register before any session exists.
+	called := 0
+	m.AddHandler(func(s *Session, e *Connect) { called++ })
+
+	s0, _ := New("Bot test")
+	s1, _ := New("Bot test")
+	s0.SyncEvents = true // dispatch synchronously so the test can assert
+	// Attach sessions the same way Open does internally.
+	m.mu.Lock()
+	m.addSessionLocked(s0)
+	m.addSessionLocked(s1)
+	m.mu.Unlock()
+
+	// Register after sessions exist.
+	m.AddHandler(func(s *Session, e *Disconnect) {})
+
+	for _, s := range m.Sessions {
+		s.Lock()
+		total := 0
+		for _, hs := range s.handlers {
+			total += len(hs)
+		}
+		s.Unlock()
+		if total != 2 {
+			t.Fatalf("shard %d: %d handlers registered, want 2", s.ShardID, total)
+		}
+	}
+
+	// The pre-registered handler must actually fire on a session.
+	s0.handleEvent(connectEventType, &Connect{})
+	if called != 1 {
+		t.Fatalf("handler fired %d times, want 1", called)
+	}
+}
+
+// redirectHost is the httptest server host used to redirect Discord REST
+// calls in tests.
+var redirectHost string
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestGuildBulkBan(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || !strings.HasSuffix(r.URL.Path, "/bulk-ban") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"banned_users":["1","2"],"failed_user_ids":["3"]}`))
+	}))
+	defer srv.Close()
+	redirectHost = srv.Listener.Addr().String()
+
+	s, _ := New("Bot test-token")
+	s.Client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		r.URL.Scheme = "http"
+		r.URL.Host = redirectHost
+		return http.DefaultTransport.RoundTrip(r)
+	})}
+	resp, err := s.GuildBulkBan("guild-id", []string{"1", "2", "3"}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.BannedUsers) != 2 || resp.BannedUsers[0] != "1" {
+		t.Fatalf("unexpected banned users: %v", resp.BannedUsers)
+	}
+	if len(resp.FailedUserIDs) != 1 || resp.FailedUserIDs[0] != "3" {
+		t.Fatalf("unexpected failed users: %v", resp.FailedUserIDs)
+	}
+}

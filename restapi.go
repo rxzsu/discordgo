@@ -788,6 +788,29 @@ func (s *Session) GuildBanCreate(guildID, userID string, days int, options ...Re
 	return s.GuildBanCreateWithReason(guildID, userID, "", days, options...)
 }
 
+// GuildBulkBan bans up to 200 users from the given guild in one request.
+// It returns the IDs of users that were banned and of users that could
+// not be banned (already banned, missing permissions, or invalid).
+// guildID              : The ID of a Guild.
+// userIDs              : The IDs of the Users to ban (max 200).
+// deleteMessageSeconds : The number of seconds of recent messages to delete.
+func (s *Session) GuildBulkBan(guildID string, userIDs []string, deleteMessageSeconds int, options ...RequestOption) (st *GuildBulkBanResponse, err error) {
+	uri := EndpointGuildBulkBan(guildID)
+
+	data := struct {
+		UserIDs              []string `json:"user_ids"`
+		DeleteMessageSeconds int      `json:"delete_message_seconds,omitempty"`
+	}{userIDs, deleteMessageSeconds}
+
+	body, err := s.RequestWithBucketID("POST", uri, data, EndpointGuildBans(guildID), options...)
+	if err != nil {
+		return
+	}
+
+	err = unmarshal(body, &st)
+	return
+}
+
 // GuildBan finds ban by given guild and user id and returns GuildBan structure
 func (s *Session) GuildBan(guildID, userID string, options ...RequestOption) (st *GuildBan, err error) {
 

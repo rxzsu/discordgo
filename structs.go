@@ -2197,6 +2197,13 @@ type MessageReaction struct {
 	GuildID   string `json:"guild_id,omitempty"`
 }
 
+// GuildBulkBanResponse stores the result of a GuildBulkBan request:
+// the user IDs that were banned and those that could not be banned.
+type GuildBulkBanResponse struct {
+	BannedUsers   []string `json:"banned_users"`
+	FailedUserIDs []string `json:"failed_user_ids"`
+}
+
 // GatewayBotResponse stores the data for the gateway/bot response
 type GatewayBotResponse struct {
 	URL               string             `json:"url"`

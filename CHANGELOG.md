@@ -4,6 +4,17 @@ All notable changes in this fork relative to upstream
 [bwmarrin/discordgo](https://github.com/bwmarrin/discordgo) are documented
 here.
 
+## v1.0.0-rc.2
+
+### Added
+- `ShardManager` (`sharding.go`): manages one Session per gateway shard
+  with shared event handlers. Auto-sizes the shard count and identify
+  delay from the GatewayBot endpoint (respects `max_concurrency`),
+  `ShardForGuildID`/`ShardIDForGuild` helpers, and an example
+  (`examples/sharding`). Upstream has no sharding support.
+- REST method `GuildBulkBan` (`POST /guilds/{id}/bulk-ban`) with
+  `GuildBulkBanResponse` — ban up to 200 users in one request.
+
 ## v1.0.0-rc.1
 
 ### Added

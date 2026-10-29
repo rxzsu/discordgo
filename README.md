@@ -28,6 +28,10 @@ differences from upstream.
   disconnected instead of retrying forever.
 - **Rate limiter**: context-aware bucket locking (`LockBucketContext`) and
   automatic pruning of stale buckets.
+- **ShardManager** (`sharding.go`): multi-shard gateway support with
+  shared handlers, automatic shard count/identify-delay discovery —
+  upstream has none. See `examples/sharding`.
+- **`GuildBulkBan`**: ban up to 200 users in a single API call.
 
 ### Breaking changes vs upstream
 
