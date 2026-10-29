@@ -9,7 +9,8 @@ a [Go](https://golang.org/) package providing low-level bindings to the
 [Discord](https://discord.com/) API (REST, Gateway websocket, and voice).
 
 It keeps tracking upstream improvements while adding its own modernizations
-and fixes on top. See [CHANGELOG.md](CHANGELOG.md) for the full list of
+and fixes on top. See **[WHY-FORK.md](WHY-FORK.md)** for the motivation and
+measured numbers, and [CHANGELOG.md](CHANGELOG.md) for the full list of
 differences from upstream.
 
 ## Differences from upstream (short version)
@@ -62,6 +63,13 @@ discordgo.Unmarshal = goccy.Unmarshal
 ```
 
 Set these **before** calling `discordgo.New()`.
+
+### Event dispatch concurrency
+
+By default every gateway event handler runs in its own goroutine, which
+preserves handler isolation. Very high-throughput bots that use only
+thread-safe handlers can set `Session.SyncEvents = true` to dispatch
+synchronously and avoid a goroutine spawn per event.
 
 ## Getting Started
 
