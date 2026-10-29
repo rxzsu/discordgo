@@ -44,6 +44,25 @@ differences from upstream.
   if you want the old default.
 - The import path is `github.com/rxzsu/discordgo`.
 
+## Performance tuning
+
+The library exposes JSON hooks used by all encoding/decoding paths:
+
+```go
+discordgo.Marshal = json.Marshal   // default
+discordgo.Unmarshal = json.Unmarshal
+```
+
+High-throughput bots can plug a faster implementation without forking:
+
+```go
+import "github.com/goccy/go-json"
+discordgo.Marshal = goccy.Marshal
+discordgo.Unmarshal = goccy.Unmarshal
+```
+
+Set these **before** calling `discordgo.New()`.
+
 ## Getting Started
 
 ### Installing

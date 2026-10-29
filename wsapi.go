@@ -578,33 +578,34 @@ func (s *Session) requestGuildMembers(data requestGuildMembersData) (err error) 
 // "OnEvent" event then all events will be passed to that handler.
 func (s *Session) onEvent(messageType int, message []byte) (*Event, error) {
 
-	var err error
-	var reader io.Reader
-	reader = bytes.NewBuffer(message)
+	var (
+		payload []byte
+		err     error
+	)
 
 	// If this is a compressed message, uncompress it.
 	if messageType == int(websocket.MessageBinary) {
-
-		z, err2 := zlib.NewReader(reader)
+		z, err2 := zlib.NewReader(bytes.NewReader(message))
 		if err2 != nil {
-			s.log(LogError, "error uncompressing websocket message, %s", err)
+			s.log(LogError, "error uncompressing websocket message, %s", err2)
 			return nil, err2
 		}
 
-		defer func() {
-			err3 := z.Close()
-			if err3 != nil {
-				s.log(LogWarning, "error closing zlib, %s", err)
-			}
-		}()
-
-		reader = z
+		payload, err = io.ReadAll(z)
+		if err != nil {
+			s.log(LogError, "error reading uncompressed websocket message, %s", err)
+			return nil, err
+		}
+		if err3 := z.Close(); err3 != nil {
+			s.log(LogWarning, "error closing zlib, %s", err3)
+		}
+	} else {
+		payload = message
 	}
 
 	// Decode the event into an Event struct.
 	var e *Event
-	decoder := json.NewDecoder(reader)
-	if err = decoder.Decode(&e); err != nil {
+	if err := Unmarshal(payload, &e); err != nil {
 		s.log(LogError, "error decoding websocket message, %s", err)
 		return e, err
 	}

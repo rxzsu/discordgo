@@ -4,6 +4,17 @@ All notable changes in this fork relative to upstream
 [bwmarrin/discordgo](https://github.com/bwmarrin/discordgo) are documented
 here.
 
+## v1.0.0-rc.5
+
+### Performance
+- Gateway event decoding: `onEvent` now uses `Unmarshal` on the message
+  buffer directly instead of constructing a `json.Decoder` per event —
+  measured dispatch cost dropped from 3760ns/15 allocs to
+  3171ns/8 allocs per event (~16% faster, ~7 fewer allocations).
+- README: documented the `Marshal`/`Unmarshal` hooks for plugging a
+  faster JSON implementation (e.g. goccy/go-json) without forking.
+- Benchmarks for the event dispatch path included.
+
 ## v1.0.0-rc.4
 
 ### Fixed
