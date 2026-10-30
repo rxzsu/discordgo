@@ -4,6 +4,21 @@ All notable changes in this fork relative to upstream
 [bwmarrin/discordgo](https://github.com/bwmarrin/discordgo) are documented
 here.
 
+## v1.0.0
+
+First stable release of the fork.
+
+### Validation
+- Live smoke test against the real Discord API: gateway connect (READY),
+  REST round-trips (message send/reply), message content intent, DM
+  channels, heartbeat latency ~155-175ms, and a 10+ minute soak with
+  zero reconnects and zero heartbeat errors.
+
+### Stability promise (now in effect)
+- Semantic versioning: breaking API changes only in major versions.
+- Deprecated APIs get at least one minor release of overlap before
+  removal.
+
 ## v1.0.0-rc.6
 
 ### Fixed
