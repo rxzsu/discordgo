@@ -7,7 +7,9 @@ package discordgo
 
 // NitroStickerPacks returns the list of available nitro sticker packs.
 func (s *Session) NitroStickerPacks(options ...RequestOption) (packs []*StickerPack, err error) {
-	body, err := s.RequestWithBucketID("GET", EndpointStickers, nil, EndpointStickers, options...)
+	// NOTE: /stickers/ (the by-ID route) is not the packs endpoint;
+	// the packs list lives at /sticker-packs.
+	body, err := s.RequestWithBucketID("GET", EndpointNitroStickersPacks, nil, EndpointNitroStickersPacks, options...)
 	if err != nil {
 		return
 	}

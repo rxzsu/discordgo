@@ -109,6 +109,10 @@ type RequestConfig struct {
 	ShouldRetryOnRateLimit bool
 	MaxRestRetries         int
 	Client                 *http.Client
+
+	// cancel is run by RequestWithLockedBucket once the request has
+	// fully completed; set by WithTimeout to release its timer early.
+	cancel func()
 }
 
 // newRequestConfig returns a new HTTP request configuration based on parameters in Session.
@@ -177,10 +181,11 @@ func WithContext(ctx context.Context) RequestOption {
 func WithTimeout(d time.Duration) RequestOption {
 	return func(cfg *RequestConfig) {
 		ctx, cancel := context.WithTimeout(cfg.Request.Context(), d)
-		// cancel is intentionally not called here: the context must stay
-		// alive for the lifetime of the in-flight http.Request.
-		_ = cancel
 		cfg.Request = cfg.Request.WithContext(ctx)
+		// The context must stay alive for the lifetime of the in-flight
+		// request, so cancel is deferred to the end of the request
+		// instead of being called here (which would leak the timer).
+		cfg.cancel = cancel
 	}
 }
 
@@ -266,6 +271,11 @@ func (s *Session) RequestWithLockedBucket(method, urlStr, contentType string, b 
 	for _, opt := range options {
 		opt(cfg)
 	}
+	defer func() {
+		if cfg.cancel != nil {
+			cfg.cancel()
+		}
+	}()
 	req = cfg.Request
 
 	if s.Debug {
@@ -916,7 +926,7 @@ func (s *Session) GuildMembersSearch(guildID, query string, limit int, options .
 		queryParams.Set("limit", strconv.Itoa(limit))
 	}
 
-	body, err := s.RequestWithBucketID("GET", uri+"?"+queryParams.Encode(), nil, uri, options...)
+	body, err := s.RequestWithBucketID("GET", uri+"?"+queryParams.Encode(), nil, BucketIDFromURL(uri), options...)
 	if err != nil {
 		return
 	}
@@ -1333,7 +1343,7 @@ func (s *Session) GuildPrune(guildID string, days uint32, options ...RequestOpti
 	}
 
 	data := struct {
-		days uint32
+		Days uint32 `json:"days"`
 	}{days}
 
 	p := struct {
@@ -1695,15 +1705,13 @@ func (s *Session) GuildTemplates(guildID string, options ...RequestOption) (st [
 // GuildTemplateCreate creates a template for the guild
 // guildID : The ID of the guild
 // data    : Template metadata
-func (s *Session) GuildTemplateCreate(guildID string, data *GuildTemplateParams, options ...RequestOption) (st *GuildTemplate) {
+func (s *Session) GuildTemplateCreate(guildID string, data *GuildTemplateParams, options ...RequestOption) (st *GuildTemplate, err error) {
 	body, err := s.RequestWithBucketID("POST", EndpointGuildTemplates(guildID), data, EndpointGuildTemplates(guildID), options...)
 	if err != nil {
 		return
 	}
 
-	if uerr := unmarshal(body, &st); uerr != nil {
-		st = nil
-	}
+	err = unmarshal(body, &st)
 	return
 }
 
@@ -2123,7 +2131,7 @@ func (s *Session) ChannelMessagesPinned(channelID string, before *time.Time, lim
 		uri += "?" + v.Encode()
 	}
 
-	body, err := s.RequestWithBucketID("GET", uri, nil, uri, options...)
+	body, err := s.RequestWithBucketID("GET", uri, nil, BucketIDFromURL(uri), options...)
 	if err != nil {
 		return
 	}
@@ -2989,7 +2997,7 @@ func (s *Session) ThreadMember(threadID, memberID string, withMember bool, optio
 	}
 
 	var body []byte
-	body, err = s.RequestWithBucketID("GET", uri, nil, uri, options...)
+	body, err = s.RequestWithBucketID("GET", uri, nil, BucketIDFromURL(uri), options...)
 
 	if err != nil {
 		return
@@ -3022,7 +3030,7 @@ func (s *Session) ThreadMembers(threadID string, limit int, withMember bool, aft
 	}
 
 	var body []byte
-	body, err = s.RequestWithBucketID("GET", uri, nil, uri, options...)
+	body, err = s.RequestWithBucketID("GET", uri, nil, BucketIDFromURL(uri), options...)
 
 	if err != nil {
 		return

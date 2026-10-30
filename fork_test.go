@@ -357,7 +357,7 @@ func TestGuildBulkBan(t *testing.T) {
 func TestStickersWidgetSoundboardAPI(t *testing.T) {
 	var createUploadContentType string
 	mux := http.NewServeMux()
-	mux.HandleFunc("/stickers/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/sticker-packs", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"sticker_packs":[{"id":"1","name":"pack"}]}`))
 	})
 	mux.HandleFunc("/guilds/g1/stickers", func(w http.ResponseWriter, r *http.Request) {

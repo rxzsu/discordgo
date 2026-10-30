@@ -645,13 +645,16 @@ func VerifyInteraction(r *http.Request, key ed25519.PublicKey) bool {
 
 	msg.WriteString(timestamp)
 
-	defer func() { _ = r.Body.Close() }()
+	origBody := r.Body
 	var body bytes.Buffer
 
-	// at the end of the function, copy the original body back into the request
+	// At the end of the function, copy the original body back into the
+	// request and close the ORIGINAL body (LIFO defer order would
+	// otherwise close the NopCloser replacement instead).
 	defer func() {
 		r.Body = io.NopCloser(&body)
 	}()
+	defer func() { _ = origBody.Close() }()
 
 	// copy body into buffers
 	_, err = io.Copy(&msg, io.TeeReader(r.Body, &body))

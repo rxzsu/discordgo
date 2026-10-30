@@ -4,6 +4,34 @@ All notable changes in this fork relative to upstream
 [bwmarrin/discordgo](https://github.com/bwmarrin/discordgo) are documented
 here.
 
+## v1.2.1
+
+Bug-fix release, second bug-audit round (REST wrappers and new code).
+
+### Fixed
+- **P0** `NitroStickerPacks` requested a nonexistent endpoint
+  (`/stickers/` — the by-ID route) and always 404'd; now uses
+  `/sticker-packs` (the `EndpointNitroStickersPacks` constant also had
+  a double-slash bug).
+- `GuildPrune` sent an empty body (unexported struct field) — the
+  `days` parameter was silently ignored and Discord always pruned with
+  its 7-day default. Now serialized properly.
+- `GuildTemplateCreate` had no error return: failures returned
+  `(nil, nil)` and callers nil-dereferenced. Signature now includes
+  `error` (technically breaking for that one method; required for
+  correctness).
+- ShardManager: handlers registered before `Open()` leaked onto shards
+  connected later — the removal closure only detached from shards that
+  existed at registration time. Handler entries now track per-session
+  removers.
+- Rate-limit bucket IDs for pinned messages / thread members /
+  archived threads / webhook execute included the query string,
+  fragmenting shared per-route limits into per-parameter buckets.
+- `VerifyInteraction` closed the NopCloser body replacement instead of
+  the original request body — leaking the server's body reader.
+- `WithTimeout` leaked a context timer per request; the cancel now
+  runs when the request completes.
+
 ## v1.2.0
 
 Performance release, second optimization audit round. No API changes.

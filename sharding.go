@@ -55,6 +55,10 @@ type ShardManager struct {
 // at run time for closures (funcs are uncomparable in Go).
 type shardHandlerEntry struct {
 	h interface{}
+	// removers holds one removal function per session the handler is
+	// attached to (including shards connected after registration).
+	// Guarded by ShardManager.mu.
+	removers map[*Session]func()
 }
 
 // NewShardManager returns a ShardManager for the given configuration.
@@ -66,16 +70,14 @@ func NewShardManager(config ShardingConfig) *ShardManager {
 // connected later by Open. The API mirrors Session.AddHandler; the
 // returned removal function detaches the handler everywhere.
 func (m *ShardManager) AddHandler(handler interface{}) func() {
-	entry := &shardHandlerEntry{h: handler}
+	entry := &shardHandlerEntry{h: handler, removers: map[*Session]func(){}}
 	m.mu.Lock()
 	m.handlers = append(m.handlers, entry)
 	sessions := m.sessionsLocked()
-	m.mu.Unlock()
-
-	removers := make([]func(), 0, len(sessions))
 	for _, s := range sessions {
-		removers = append(removers, s.AddHandler(handler))
+		entry.removers[s] = s.AddHandler(handler)
 	}
+	m.mu.Unlock()
 
 	var once sync.Once
 	return func() {
@@ -86,6 +88,10 @@ func (m *ShardManager) AddHandler(handler interface{}) func() {
 					m.handlers = append(m.handlers[:i], m.handlers[i+1:]...)
 					break
 				}
+			}
+			removers := make([]func(), 0, len(entry.removers))
+			for _, rm := range entry.removers {
+				removers = append(removers, rm)
 			}
 			m.mu.Unlock()
 			for _, rm := range removers {
@@ -98,16 +104,14 @@ func (m *ShardManager) AddHandler(handler interface{}) func() {
 // AddHandlerOnce is AddHandler with Session.AddHandlerOnce semantics:
 // the handler fires once per shard and is then removed.
 func (m *ShardManager) AddHandlerOnce(handler interface{}) func() {
-	entry := &shardHandlerEntry{h: handler}
+	entry := &shardHandlerEntry{h: handler, removers: map[*Session]func(){}}
 	m.mu.Lock()
 	m.once = append(m.once, entry)
 	sessions := m.sessionsLocked()
-	m.mu.Unlock()
-
-	removers := make([]func(), 0, len(sessions))
 	for _, s := range sessions {
-		removers = append(removers, s.AddHandlerOnce(handler))
+		entry.removers[s] = s.AddHandlerOnce(handler)
 	}
+	m.mu.Unlock()
 
 	var once sync.Once
 	return func() {
@@ -118,6 +122,10 @@ func (m *ShardManager) AddHandlerOnce(handler interface{}) func() {
 					m.once = append(m.once[:i], m.once[i+1:]...)
 					break
 				}
+			}
+			removers := make([]func(), 0, len(entry.removers))
+			for _, rm := range entry.removers {
+				removers = append(removers, rm)
 			}
 			m.mu.Unlock()
 			for _, rm := range removers {
@@ -205,10 +213,10 @@ func (m *ShardManager) Open() error {
 // handler registered so far; m.mu must be held.
 func (m *ShardManager) addSessionLocked(s *Session) {
 	for _, e := range m.handlers {
-		s.AddHandler(e.h)
+		e.removers[s] = s.AddHandler(e.h)
 	}
 	for _, e := range m.once {
-		s.AddHandlerOnce(e.h)
+		e.removers[s] = s.AddHandlerOnce(e.h)
 	}
 	m.Sessions = append(m.Sessions, s)
 }
