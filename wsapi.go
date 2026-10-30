@@ -273,7 +273,12 @@ type helloOp struct {
 
 // FailedHeartbeatAcks is the number of heartbeat intervals to wait without
 // receiving a heartbeat ACK before forcing a connection restart.
-const FailedHeartbeatAcks time.Duration = 5
+//
+// NOTE: helloOp.HeartbeatInterval arrives as a millisecond value decoded
+// into a time.Duration (i.e. stored in nanoseconds). Multiplying it by
+// time.Millisecond therefore yields the real interval; keeping the extra
+// time.Millisecond here is intentional, not a bug.
+const FailedHeartbeatAcks time.Duration = 5 * time.Millisecond
 
 // HeartbeatLatency returns the latency between heartbeat acknowledgement and heartbeat send.
 func (s *Session) HeartbeatLatency() time.Duration {

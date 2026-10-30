@@ -11,7 +11,6 @@ those and adds capabilities upstream lacks.
 
 | Bug | Upstream behavior | Fork behavior |
 |---|---|---|
-| Heartbeat reconnect threshold | Computed as `interval × 5ms` (~200ms for the standard 41s interval) — any slow ACK caused a spurious disconnect/reconnect loop | 5 heartbeat intervals (~3.5 min of silence) |
 | State memory leak | Default state kept **every received message forever** (`MaxMessageCount` defaulted to 0 = unlimited) — gigabytes of RAM on busy bots | Defaults to 1000 messages per channel |
 | Voice RTP timestamp overflow | The wrap-around check was dead code (`uint32 >= 0xFFFFFFFF` unreachable); long voice sessions could corrupt the RTP timestamp after ~13h | Correct overflow detection |
 | Voice reconnect loop | Retried forever even after the user called `Disconnect()` | Stops when the connection is no longer registered |

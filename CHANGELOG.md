@@ -4,6 +4,15 @@ All notable changes in this fork relative to upstream
 [bwmarrin/discordgo](https://github.com/bwmarrin/discordgo) are documented
 here.
 
+## v1.0.0-rc.6
+
+### Fixed
+- Reverted the heartbeat-ACK threshold change introduced in v0.30.0.
+  A live smoke test caught it: the threshold collapsed to ~200
+  microseconds, causing a reconnect after the first heartbeat. The
+  upstream constant was correct all along; docs corrected accordingly
+  (WHY-FORK.md bug table updated).
+
 ## v1.0.0-rc.5
 
 ### Performance
@@ -117,9 +126,10 @@ here.
 - Websocket layer migrated from `gorilla/websocket` (unmaintained) to
   `github.com/coder/websocket` v1.8.15. `Session.Dialer` was replaced by
   `Session.DialTimeout` (breaking).
-- Heartbeat reconnect threshold fixed: upstream computed it as
-  `interval × 5ms` (~200ms for the standard 41s interval) instead of 5
-  heartbeat intervals, causing spurious reconnects on slow ACKs.
+- Heartbeat reconnect threshold: initially changed to a plain interval
+  count; REVERTED in v1.0.0-rc.6 — upstream's `5 * time.Millisecond`
+  was correct given that `HeartbeatInterval` decodes milliseconds into
+  a nanosecond-based time.Duration. No behavioral change vs upstream.
 - REST retries on 429/5xx now respect the request context: a cancelled or
   timed-out request aborts instead of sleeping out `retry_after`.
 - `IntentsAllWithoutPrivileged` now includes

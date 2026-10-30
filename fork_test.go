@@ -113,10 +113,11 @@ func TestPollIntentsInDefaults(t *testing.T) {
 }
 
 func TestFailedHeartbeatAcksValue(t *testing.T) {
-	// Must be a plain interval count, not a duration like 5ms (which made
-	// the reconnect threshold ~200ms and caused spurious reconnects).
-	if FailedHeartbeatAcks != 5 {
-		t.Fatalf("expected FailedHeartbeatAcks = 5, got %v", FailedHeartbeatAcks)
+	// helloOp.HeartbeatInterval decodes a millisecond value into a
+	// time.Duration (nanoseconds). The threshold must therefore include
+	// one time.Millisecond factor: interval * 5ms == 5 real intervals.
+	if FailedHeartbeatAcks != 5*time.Millisecond {
+		t.Fatalf("expected FailedHeartbeatAcks = 5ms, got %v", FailedHeartbeatAcks)
 	}
 }
 
