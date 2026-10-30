@@ -135,3 +135,16 @@ func BenchmarkOnEventCompressed(b *testing.B) {
 		_, _ = s.onEvent(int(websocket.MessageBinary), compressed)
 	}
 }
+
+func BenchmarkOnEventLarge(b *testing.B) {
+	s, _ := New("Bot benchmark-token")
+	bigContent := strings.Repeat("x", 4096)
+	payload := []byte(`{"t":"MESSAGE_CREATE","s":1,"op":0,"d":{"id":"1","channel_id":"c","author":{"id":"u","username":"n"},"content":"` + bigContent + `"}}`)
+
+	b.ReportAllocs()
+	b.SetBytes(int64(len(payload)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = s.onEvent(int(websocket.MessageText), payload)
+	}
+}
