@@ -4,6 +4,16 @@ All notable changes in this fork relative to upstream
 [bwmarrin/discordgo](https://github.com/bwmarrin/discordgo) are documented
 here.
 
+## v1.3.0
+
+### Added
+- Opt-in JSON accelerators via build tags: `go build -tags goccy` or
+  `go build -tags sonic` wire the Marshal/Unmarshal hooks automatically.
+  Measured: goccy cuts event decode by ~22% on small events and ~61% on
+  large ones (38203 -> 15072 ns/op, 110 -> 279 MB/s); sonic measured
+  slower than goccy at both sizes on this workload. Benchmarks
+  extended with a large-payload dispatch case.
+
 ## v1.2.1
 
 Bug-fix release, second bug-audit round (REST wrappers and new code).

@@ -54,15 +54,27 @@ discordgo.Marshal = json.Marshal   // default
 discordgo.Unmarshal = json.Unmarshal
 ```
 
-High-throughput bots can plug a faster implementation without forking:
+High-throughput bots can plug a faster implementation without forking.
+Or simply build with a tag (the library ships opt-in accelerators):
 
-```go
-import "github.com/goccy/go-json"
-discordgo.Marshal = goccy.Marshal
-discordgo.Unmarshal = goccy.Unmarshal
+```sh
+go get github.com/goccy/go-json
+go build -tags goccy ./...
 ```
 
-Set these **before** calling `discordgo.New()`.
+Measured on this repo's benchmarks (Ryzen 5 5600X), gateway event decode:
+
+| JSON          | small event (368 B) | large event (4.2 KB)             |
+|---------------|--------------------:|---------------------------------:|
+| encoding/json | 3679 ns/op          | 38203 ns/op (110 MB/s)           |
+| goccy/go-json | 2877 ns/op (-22%)   | 15072 ns/op (**-61%**, 279 MB/s) |
+| sonic         | 3486 ns/op (-5%)    | 17968 ns/op (-53%)               |
+
+goccy wins on both small and large payloads; sonic's JIT advantage did
+not materialize at these sizes. The `-tags goccy` / `-tags sonic` files
+(`json_goccy.go` / `json_sonic.go`) set the hooks before any session is
+created, or set `discordgo.Marshal`/`Unmarshal` manually **before**
+calling `discordgo.New()`.
 
 ### Event dispatch concurrency
 
