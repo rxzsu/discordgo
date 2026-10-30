@@ -609,20 +609,29 @@ func (s *Session) onEvent(messageType int, message []byte) (*Event, error) {
 
 	// If this is a compressed message, uncompress it.
 	if messageType == int(websocket.MessageBinary) {
-		z, err2 := zlib.NewReader(bytes.NewReader(message))
-		if err2 != nil {
-			s.log(LogError, "error uncompressing websocket message, %s", err2)
+		// compress/zlib's reader implements flate.Resetter, so one
+		// long-lived reader per session replaces the fresh reader (and
+		// its 32KB window) plus a fresh output buffer on every message.
+		// Only the listen goroutine and Open call onEvent, so these
+		// fields need no extra synchronization.
+		if s.zr == nil {
+			z, err2 := zlib.NewReader(bytes.NewReader(message))
+			if err2 != nil {
+				s.log(LogError, "error uncompressing websocket message, %s", err2)
+				return nil, err2
+			}
+			s.zr = z
+		} else if err2 := s.zr.(zlib.Resetter).Reset(bytes.NewReader(message), nil); err2 != nil {
+			s.log(LogError, "error resetting zlib reader, %s", err2)
 			return nil, err2
 		}
 
-		payload, err = io.ReadAll(z)
-		if err != nil {
+		s.zbuf.Reset()
+		if _, err = io.Copy(&s.zbuf, s.zr); err != nil {
 			s.log(LogError, "error reading uncompressed websocket message, %s", err)
 			return nil, err
 		}
-		if err3 := z.Close(); err3 != nil {
-			s.log(LogWarning, "error closing zlib, %s", err3)
-		}
+		payload = s.zbuf.Bytes()
 	} else {
 		payload = message
 	}
@@ -735,7 +744,11 @@ func (s *Session) onEvent(messageType int, message []byte) (*Event, error) {
 	}
 
 	// For legacy reasons, we send the raw event also, this could be useful for handling unknown events.
-	s.handleEvent(eventEventType, e)
+	// Skipping the whole dispatch pipeline when no raw handlers are
+	// registered roughly halves the per-event dispatch work.
+	if s.hasHandlers(eventEventType) {
+		s.handleEvent(eventEventType, e)
+	}
 
 	return e, nil
 }
@@ -1007,6 +1020,10 @@ func (s *Session) CloseWithCode(closeCode int) (err error) {
 	s.Lock()
 
 	s.stopDispatchWorkers()
+	if s.zr != nil {
+		_ = s.zr.Close()
+		s.zr = nil
+	}
 	s.DataReady = false
 
 	if s.listening != nil {

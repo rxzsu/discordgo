@@ -175,9 +175,14 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*m = Message(v.message)
-	m.Components = make([]MessageComponent, len(v.RawComponents))
-	for i, v := range v.RawComponents {
-		m.Components[i] = v.MessageComponent
+	// The vast majority of messages have no components; only allocate
+	// when present (also keeps the nil-check merge logic in state
+	// MessageAdd meaningful).
+	if len(v.RawComponents) > 0 {
+		m.Components = make([]MessageComponent, len(v.RawComponents))
+		for i, c := range v.RawComponents {
+			m.Components[i] = c.MessageComponent
+		}
 	}
 	return err
 }

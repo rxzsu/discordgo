@@ -52,6 +52,15 @@ type State struct {
 	guildMap   map[string]*Guild
 	channelMap map[string]*Channel
 	memberMap  map[string]map[string]*Member
+
+	// messageIndex maps channelID -> messageID -> *Message and mirrors
+	// Channel.Messages, turning O(n) scans in MessageAdd/Message/
+	// messageRemoveByID into O(1) lookups on the hottest state path.
+	messageIndex map[string]map[string]*Message
+	// presenceIndex maps guildID -> userID -> *Presence and mirrors
+	// Guild.Presences; presence updates are the highest-volume event
+	// type on large guilds.
+	presenceIndex map[string]map[string]*Presence
 }
 
 // NewState creates an empty state.
@@ -76,11 +85,13 @@ func NewState() *State {
 		guildMap:        make(map[string]*Guild),
 		channelMap:      make(map[string]*Channel),
 		memberMap:       make(map[string]map[string]*Member),
+		messageIndex:    make(map[string]map[string]*Message),
+		presenceIndex:   make(map[string]map[string]*Presence),
 	}
 }
 
 func (s *State) createMemberMap(guild *Guild) {
-	members := make(map[string]*Member)
+	members := make(map[string]*Member, len(guild.Members))
 	for _, m := range guild.Members {
 		members[m.User.ID] = m
 	}
@@ -213,50 +224,56 @@ func (s *State) presenceAdd(guildID string, presence *Presence) error {
 		return ErrStateNotFound
 	}
 
-	for i, p := range guild.Presences {
-		if p.User.ID == presence.User.ID {
-			//guild.Presences[i] = presence
-
-			//Update status
-			guild.Presences[i].Activities = presence.Activities
-			if presence.Status != "" {
-				guild.Presences[i].Status = presence.Status
-			}
-			if presence.ClientStatus.Desktop != "" {
-				guild.Presences[i].ClientStatus.Desktop = presence.ClientStatus.Desktop
-			}
-			if presence.ClientStatus.Mobile != "" {
-				guild.Presences[i].ClientStatus.Mobile = presence.ClientStatus.Mobile
-			}
-			if presence.ClientStatus.Web != "" {
-				guild.Presences[i].ClientStatus.Web = presence.ClientStatus.Web
-			}
-
-			//Update the optionally sent user information
-			//ID Is a mandatory field so you should not need to check if it is empty
-			guild.Presences[i].User.ID = presence.User.ID
-
-			if presence.User.Avatar != "" {
-				guild.Presences[i].User.Avatar = presence.User.Avatar
-			}
-			if presence.User.Discriminator != "" {
-				guild.Presences[i].User.Discriminator = presence.User.Discriminator
-			}
-			if presence.User.Email != "" {
-				guild.Presences[i].User.Email = presence.User.Email
-			}
-			if presence.User.Token != "" {
-				guild.Presences[i].User.Token = presence.User.Token
-			}
-			if presence.User.Username != "" {
-				guild.Presences[i].User.Username = presence.User.Username
-			}
-
-			return nil
+	// Index lookup instead of an O(n) scan over guild.Presences:
+	// presence updates are the highest-volume event type on large guilds.
+	pidx := s.presenceIndex[guildID]
+	if pidx == nil {
+		pidx = make(map[string]*Presence)
+		s.presenceIndex[guildID] = pidx
+	}
+	if p, ok := pidx[presence.User.ID]; ok {
+		// guild.Presences holds the same pointer, so updating in place
+		// keeps both views in sync.
+		//Update status
+		p.Activities = presence.Activities
+		if presence.Status != "" {
+			p.Status = presence.Status
 		}
+		if presence.ClientStatus.Desktop != "" {
+			p.ClientStatus.Desktop = presence.ClientStatus.Desktop
+		}
+		if presence.ClientStatus.Mobile != "" {
+			p.ClientStatus.Mobile = presence.ClientStatus.Mobile
+		}
+		if presence.ClientStatus.Web != "" {
+			p.ClientStatus.Web = presence.ClientStatus.Web
+		}
+
+		//Update the optionally sent user information
+		if p.User == nil {
+			p.User = &User{ID: presence.User.ID}
+		}
+		if presence.User.Avatar != "" {
+			p.User.Avatar = presence.User.Avatar
+		}
+		if presence.User.Discriminator != "" {
+			p.User.Discriminator = presence.User.Discriminator
+		}
+		if presence.User.Email != "" {
+			p.User.Email = presence.User.Email
+		}
+		if presence.User.Token != "" {
+			p.User.Token = presence.User.Token
+		}
+		if presence.User.Username != "" {
+			p.User.Username = presence.User.Username
+		}
+
+		return nil
 	}
 
 	guild.Presences = append(guild.Presences, presence)
+	pidx[presence.User.ID] = presence
 	return nil
 }
 
@@ -287,6 +304,21 @@ func (s *State) PresenceRemove(guildID string, presence *Presence) error {
 	s.Lock()
 	defer s.Unlock()
 
+	if pidx := s.presenceIndex[guildID]; pidx != nil {
+		p, ok := pidx[presence.User.ID]
+		if !ok {
+			return ErrStateNotFound
+		}
+		delete(pidx, presence.User.ID)
+		for i := range guild.Presences {
+			if guild.Presences[i] == p {
+				guild.Presences = append(guild.Presences[:i], guild.Presences[i+1:]...)
+				break
+			}
+		}
+		return nil
+	}
+
 	for i, p := range guild.Presences {
 		if p.User.ID == presence.User.ID {
 			guild.Presences = append(guild.Presences[:i], guild.Presences[i+1:]...)
@@ -303,11 +335,20 @@ func (s *State) Presence(guildID, userID string) (*Presence, error) {
 		return nil, ErrNilState
 	}
 
-	guild, err := s.Guild(guildID)
-	if err != nil {
-		return nil, err
+	s.RLock()
+	defer s.RUnlock()
+
+	if pidx := s.presenceIndex[guildID]; pidx != nil {
+		if p, ok := pidx[userID]; ok {
+			return p, nil
+		}
+		return nil, ErrStateNotFound
 	}
 
+	guild, ok := s.guildMap[guildID]
+	if !ok {
+		return nil, ErrStateNotFound
+	}
 	for _, p := range guild.Presences {
 		if p.User.ID == userID {
 			return p, nil
@@ -785,40 +826,49 @@ func (s *State) MessageAdd(message *Message) error {
 	defer s.Unlock()
 
 	// If the message exists, merge in the new message contents.
-	for _, m := range c.Messages {
-		if m.ID == message.ID {
-			if message.Content != "" {
-				m.Content = message.Content
-			}
-			if message.EditedTimestamp != nil {
-				m.EditedTimestamp = message.EditedTimestamp
-			}
-			if message.Mentions != nil {
-				m.Mentions = message.Mentions
-			}
-			if message.Embeds != nil {
-				m.Embeds = message.Embeds
-			}
-			if message.Attachments != nil {
-				m.Attachments = message.Attachments
-			}
-			if !message.Timestamp.IsZero() {
-				m.Timestamp = message.Timestamp
-			}
-			if message.Author != nil {
-				m.Author = message.Author
-			}
-			if message.Components != nil {
-				m.Components = message.Components
-			}
-
-			return nil
+	// The index makes this an O(1) lookup instead of a full scan.
+	idx := s.messageIndex[message.ChannelID]
+	if idx == nil {
+		idx = make(map[string]*Message)
+		s.messageIndex[message.ChannelID] = idx
+	}
+	if m, ok := idx[message.ID]; ok {
+		if message.Content != "" {
+			m.Content = message.Content
 		}
+		if message.EditedTimestamp != nil {
+			m.EditedTimestamp = message.EditedTimestamp
+		}
+		if message.Mentions != nil {
+			m.Mentions = message.Mentions
+		}
+		if message.Embeds != nil {
+			m.Embeds = message.Embeds
+		}
+		if message.Attachments != nil {
+			m.Attachments = message.Attachments
+		}
+		if !message.Timestamp.IsZero() {
+			m.Timestamp = message.Timestamp
+		}
+		if message.Author != nil {
+			m.Author = message.Author
+		}
+		if message.Components != nil {
+			m.Components = message.Components
+		}
+
+		return nil
 	}
 
 	c.Messages = append(c.Messages, message)
+	idx[message.ID] = message
 
 	if s.MaxMessageCount > 0 && len(c.Messages) > s.MaxMessageCount {
+		// Drop the evicted messages from the index before reslicing.
+		for _, evicted := range c.Messages[:len(c.Messages)-s.MaxMessageCount] {
+			delete(idx, evicted.ID)
+		}
 		c.Messages = c.Messages[len(c.Messages)-s.MaxMessageCount:]
 	}
 
@@ -844,10 +894,24 @@ func (s *State) messageRemoveByID(channelID, messageID string) error {
 	s.Lock()
 	defer s.Unlock()
 
+	if idx := s.messageIndex[channelID]; idx != nil {
+		if _, ok := idx[messageID]; !ok {
+			return ErrStateNotFound
+		}
+		for i, m := range c.Messages {
+			if m.ID == messageID {
+				delete(idx, messageID)
+				c.Messages = append(c.Messages[:i], c.Messages[i+1:]...)
+				return nil
+			}
+		}
+		return ErrStateNotFound
+	}
+
+	// No index (state built before tracking started): fall back to scan.
 	for i, m := range c.Messages {
 		if m.ID == messageID {
 			c.Messages = append(c.Messages[:i], c.Messages[i+1:]...)
-
 			return nil
 		}
 	}
@@ -920,6 +984,13 @@ func (s *State) Message(channelID, messageID string) (*Message, error) {
 	s.RLock()
 	defer s.RUnlock()
 
+	if idx := s.messageIndex[channelID]; idx != nil {
+		if m, ok := idx[messageID]; ok {
+			return m, nil
+		}
+		return nil, ErrStateNotFound
+	}
+
 	for _, m := range c.Messages {
 		if m.ID == messageID {
 			return m, nil
@@ -959,9 +1030,11 @@ func (s *State) onReady(se *Session, r *Ready) (err error) {
 	// Reset the indexes: a fresh READY (e.g. after a non-resumable
 	// reconnect) is the authoritative world state; keeping entries from
 	// the previous session leaves phantom guilds/channels behind.
-	s.guildMap = make(map[string]*Guild)
+	s.guildMap = make(map[string]*Guild, len(s.Guilds))
 	s.channelMap = make(map[string]*Channel)
-	s.memberMap = make(map[string]map[string]*Member)
+	s.memberMap = make(map[string]map[string]*Member, len(s.Guilds))
+	s.messageIndex = make(map[string]map[string]*Message)
+	s.presenceIndex = make(map[string]map[string]*Presence)
 
 	for _, g := range s.Guilds {
 		s.guildMap[g.ID] = g
@@ -1009,13 +1082,14 @@ func (s *State) OnInterface(se *Session, i interface{}) (err error) {
 
 		err = s.GuildRemove(t.Guild)
 	case *GuildMemberAdd:
-		var guild *Guild
-		// Updates the MemberCount of the guild.
-		guild, err = s.Guild(t.Member.GuildID)
-		if err != nil {
-			return err
+		// Update MemberCount under the write lock: the read-modify-write
+		// races with concurrent member events (DispatchWorkers, other
+		// goroutines calling into the state).
+		s.Lock()
+		if guild, ok := s.guildMap[t.Member.GuildID]; ok {
+			guild.MemberCount++
 		}
-		guild.MemberCount++
+		s.Unlock()
 
 		// Caches member if tracking is enabled.
 		if s.TrackMembers {
@@ -1033,13 +1107,12 @@ func (s *State) OnInterface(se *Session, i interface{}) (err error) {
 			err = s.MemberAdd(t.Member)
 		}
 	case *GuildMemberRemove:
-		var guild *Guild
-		// Updates the MemberCount of the guild.
-		guild, err = s.Guild(t.Member.GuildID)
-		if err != nil {
-			return err
+		// Update MemberCount under the write lock (see GuildMemberAdd).
+		s.Lock()
+		if guild, ok := s.guildMap[t.Member.GuildID]; ok {
+			guild.MemberCount--
 		}
-		guild.MemberCount--
+		s.Unlock()
 
 		// Removes member from the cache if tracking is enabled.
 		if s.TrackMembers {

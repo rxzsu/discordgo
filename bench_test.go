@@ -1,6 +1,8 @@
 package discordgo
 
 import (
+	"bytes"
+	"compress/zlib"
 	"net/http"
 	"strconv"
 	"strings"
@@ -115,4 +117,21 @@ func BenchmarkGetBucketConcurrent(b *testing.B) {
 			i++
 		}
 	})
+}
+
+func BenchmarkOnEventCompressed(b *testing.B) {
+	s, _ := New("Bot benchmark-token")
+	payload := []byte(`{"t":"MESSAGE_CREATE","s":1,"op":0,"d":{"id":"1","channel_id":"c","author":{"id":"u","username":"n"},"content":"hello world"}}`)
+
+	var raw bytes.Buffer
+	w := zlib.NewWriter(&raw)
+	_, _ = w.Write(payload)
+	_ = w.Close()
+	compressed := raw.Bytes()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = s.onEvent(int(websocket.MessageBinary), compressed)
+	}
 }

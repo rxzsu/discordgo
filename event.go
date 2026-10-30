@@ -167,6 +167,15 @@ func (s *Session) removeEventHandlerInstance(t string, ehi *eventHandlerInstance
 	s.onceMu.Unlock()
 }
 
+// hasHandlers reports whether any handler is registered for the event
+// type. The dispatch cost of an event with no listeners is not zero
+// (onInterface + handle chain), so the gateway hot path can skip it.
+func (s *Session) hasHandlers(t string) bool {
+	s.handlersMu.RLock()
+	defer s.handlersMu.RUnlock()
+	return len(s.handlers[t]) > 0
+}
+
 // dispatchQueueSize is the buffer size of the dispatch job queue when
 // Session.DispatchWorkers is used. Jobs beyond the queue fall back to a
 // goroutine so events are never dropped.

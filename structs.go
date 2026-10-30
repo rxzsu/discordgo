@@ -12,8 +12,10 @@
 package discordgo
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"regexp"
@@ -132,6 +134,11 @@ type Session struct {
 	// dispatch worker pool (active only when DispatchWorkers > 0)
 	dispatchJobs chan func()
 	dispatchStop chan struct{}
+
+	// reusable zlib decompressor for compressed gateway frames; accessed
+	// only from the listen goroutine and Open.
+	zr   io.ReadCloser
+	zbuf bytes.Buffer
 
 	// The websocket connection.
 	wsConn *websocket.Conn
