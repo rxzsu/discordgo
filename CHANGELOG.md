@@ -4,6 +4,32 @@ All notable changes in this fork relative to upstream
 [bwmarrin/discordgo](https://github.com/bwmarrin/discordgo) are documented
 here.
 
+## v1.2.0
+
+Performance release, second optimization audit round. No API changes.
+
+### Performance
+- State: per-channel message index and per-guild presence index —
+  `MessageAdd`/`Message`/`messageRemoveByID` and
+  `presenceAdd`/`PresenceRemove`/`Presence` are O(1) instead of O(n)
+  scans under the state lock (the hottest paths on busy servers;
+  presences are the highest-volume event type on large guilds).
+- Gateway: one persistent resettable zlib reader per session plus a
+  reusable output buffer replaces a fresh 32KB-window reader and
+  fresh buffer per compressed frame (compressed events measured at
+  10 allocs vs ~16).
+- Dispatch: the legacy raw-`*Event` dispatch pipeline is skipped
+  entirely when no raw handlers are registered — roughly half the
+  per-event dispatch work in the common case (`hasHandlers`).
+- `Message.UnmarshalJSON` no longer allocates an empty Components
+  slice for every message.
+- State maps (`createMemberMap`, `onReady` guild map) are pre-sized —
+  no ~17 rehash passes under the write lock for a 100k-member READY.
+
+### Fixed
+- `guild.MemberCount++/--` raced on concurrent member events
+  (read-modify-write outside the state lock); now under the write lock.
+
 ## v1.1.1
 
 Bug-fix release following a full-codebase agent audit. No API changes.
