@@ -4,6 +4,37 @@ All notable changes in this fork relative to upstream
 [bwmarrin/discordgo](https://github.com/bwmarrin/discordgo) are documented
 here.
 
+## v1.1.1
+
+Bug-fix release following a full-codebase agent audit. No API changes.
+
+### Fixed
+- voice: `Packet.Type` aliased the reused UDP read buffer — received
+  packets' headers were corrupted by the next read before consumers
+  saw them. Now copied. Also: `nonceCounter` is atomic (data race with
+  reconnect), and `opusSender` reuses one buffer instead of 3
+  allocations per audio packet.
+- ShardManager: `remove()` panicked on any closure handler (`comparing
+  uncomparable type func`); handlers are now tracked by pointer
+  identity. `ShardForGuildID` takes the manager lock. `Open` no longer
+  connects remaining shards if `Close` ran during the identify delay.
+- event: `onceHandlers` were mutated under a shared RLock — concurrent
+  same-type events could fatal (`concurrent map writes`) and
+  double-fire once handlers. Drain is now exclusive (`onceMu`);
+  `dispatchJobs` reads synchronized.
+- state: `ThreadMembersUpdate` panicked with 2+ removed members and
+  compared the wrong field (`ThreadMember.ID` instead of `UserID`);
+  `ThreadMemberUpdate` mutated shared state without the write lock;
+  `GuildRemove` now cleans `channelMap`/`memberMap`; `onReady` resets
+  indexes so entities of a previous session don't linger after
+  non-resumable reconnects.
+- wsapi: handshake reads in `Open` are bounded (30s) — a stalled
+  gateway no longer holds the session lock forever; gateway writers no
+  longer hold `s.RLock` across socket writes.
+
+Found by a two-agent code audit (bug-focused and performance-focused)
+with manual verification of every claim.
+
 ## v1.1.0
 
 ### Added
