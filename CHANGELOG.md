@@ -4,6 +4,23 @@ All notable changes in this fork relative to upstream
 [bwmarrin/discordgo](https://github.com/bwmarrin/discordgo) are documented
 here.
 
+## v1.1.0
+
+### Added
+- `Session.DispatchWorkers` — optional fixed worker pool for event
+  handlers. Bounded memory during event storms; 1024-slot queue with
+  goroutine fallback (events are never dropped). Set before `Open()`.
+- Sonic as a drop-in alternative to goccy for the JSON hooks
+  (documented in README).
+
+### Changed
+- `RateLimiter` now uses 16 independent shards (per-shard lock + map)
+  instead of a single mutex over one map, so bucket lookups do not
+  serialize concurrent REST traffic. Technically breaking for code that
+  relied on the previously embedded (unintended) `sync.Mutex` methods
+  on `RateLimiter` itself — use the documented API instead.
+- New rate limiter introspection: `GetBucketIfPresent`, `BucketCount`.
+
 ## v1.0.0
 
 First stable release of the fork.

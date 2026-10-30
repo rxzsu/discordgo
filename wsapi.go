@@ -206,6 +206,12 @@ func (s *Session) Open() error {
 	// go rountines.
 	s.listening = make(chan interface{})
 
+	// Start the fixed handler worker pool if configured.
+	// NOTE: Open holds s.Lock for its whole duration.
+	if s.DispatchWorkers > 0 && s.dispatchJobs == nil {
+		s.startDispatchWorkers()
+	}
+
 	// Start sending heartbeats and reading messages from Discord.
 	go s.heartbeat(s.wsConn, s.listening, h.HeartbeatInterval)
 	go s.listen(s.wsConn, s.listening)
@@ -987,6 +993,7 @@ func (s *Session) CloseWithCode(closeCode int) (err error) {
 	s.log(LogInformational, "called")
 	s.Lock()
 
+	s.stopDispatchWorkers()
 	s.DataReady = false
 
 	if s.listening != nil {

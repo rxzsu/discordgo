@@ -67,9 +67,20 @@ Set these **before** calling `discordgo.New()`.
 ### Event dispatch concurrency
 
 By default every gateway event handler runs in its own goroutine, which
-preserves handler isolation. Very high-throughput bots that use only
-thread-safe handlers can set `Session.SyncEvents = true` to dispatch
-synchronously and avoid a goroutine spawn per event.
+preserves handler isolation. For fine-grained control:
+
+- `Session.SyncEvents = true` — dispatch synchronously (no goroutine
+  per event); only for fully thread-safe handlers.
+- `Session.DispatchWorkers = 64` (before `Open()`) — run handlers on a
+  fixed worker pool of that size. Bounds memory during event storms
+  (e.g. GUILD_CREATE on many servers); if the 1024-slot queue is full,
+  jobs fall back to a goroutine so events are never dropped.
+
+The rate limiter uses 16 independent shards (lock + map per shard), so
+bucket lookups do not serialize REST traffic on a single mutex.
+
+For maximum JSON throughput on amd64, `bytedance/sonic` can be plugged
+into the same `Marshal`/`Unmarshal` hooks as goccy (see above).
 
 ## Getting Started
 

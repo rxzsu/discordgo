@@ -2,6 +2,7 @@ package discordgo
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -69,4 +70,49 @@ func BenchmarkStateMessageAdd(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		_ = st.MessageAdd(&Message{ID: string(rune('a' + i%26)), ChannelID: "c1"})
 	}
+}
+
+func BenchmarkDispatchGoroutine(b *testing.B) {
+	s, _ := New("Bot benchmark-token")
+	s.AddHandler(func(s *Session, m *MessageCreate) {})
+	s.SyncEvents = false
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		s.handle("__MESSAGE_CREATE__", &MessageCreate{})
+	}
+}
+
+func BenchmarkDispatchWorkerPool(b *testing.B) {
+	s, _ := New("Bot benchmark-token")
+	s.AddHandler(func(s *Session, m *MessageCreate) {})
+	s.DispatchWorkers = 64
+	s.startDispatchWorkers()
+	defer s.stopDispatchWorkers()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		s.handle("__MESSAGE_CREATE__", &MessageCreate{})
+	}
+}
+
+func BenchmarkGetBucketSerial(b *testing.B) {
+	r := NewRatelimiter()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = r.GetBucket("https://discord.com/api/v9/channels/123/messages")
+	}
+}
+
+func BenchmarkGetBucketConcurrent(b *testing.B) {
+	r := NewRatelimiter()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			_ = r.GetBucket("https://discord.com/api/v9/channels/" + strconv.Itoa(i%128) + "/messages")
+			i++
+		}
+	})
 }

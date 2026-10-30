@@ -100,6 +100,13 @@ type Session struct {
 	// The timeout used when dialing WebSocket connections (gateway and voice).
 	DialTimeout time.Duration
 
+	// DispatchWorkers is the optional size of a fixed worker pool used to
+	// run event handlers. When 0 (default), each event handler runs in
+	// its own goroutine. Setting it (e.g. 64) bounds memory during event
+	// storms; handlers still run concurrently with each other. Must be
+	// set before Open().
+	DispatchWorkers int
+
 	// The user agent used for REST APIs
 	UserAgent string
 
@@ -116,6 +123,10 @@ type Session struct {
 	handlersMu   sync.RWMutex
 	handlers     map[string][]*eventHandlerInstance
 	onceHandlers map[string][]*eventHandlerInstance
+
+	// dispatch worker pool (active only when DispatchWorkers > 0)
+	dispatchJobs chan func()
+	dispatchStop chan struct{}
 
 	// The websocket connection.
 	wsConn *websocket.Conn

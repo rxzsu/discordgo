@@ -163,21 +163,76 @@ func (s *Session) removeEventHandlerInstance(t string, ehi *eventHandlerInstance
 	}
 }
 
+// dispatchQueueSize is the buffer size of the dispatch job queue when
+// Session.DispatchWorkers is used. Jobs beyond the queue fall back to a
+// goroutine so events are never dropped.
+const dispatchQueueSize = 1024
+
+// startDispatchWorkers spins up the fixed handler worker pool. It is
+// called from Open when Session.DispatchWorkers > 0.
+func (s *Session) startDispatchWorkers() {
+	s.dispatchJobs = make(chan func(), dispatchQueueSize)
+	s.dispatchStop = make(chan struct{})
+	for i := 0; i < s.DispatchWorkers; i++ {
+		go func() {
+			for {
+				select {
+				case <-s.dispatchStop:
+					return
+				case f := <-s.dispatchJobs:
+					f()
+				}
+			}
+		}()
+	}
+}
+
+// stopDispatchWorkers shuts the worker pool down.
+func (s *Session) stopDispatchWorkers() {
+	if s.dispatchStop != nil {
+		close(s.dispatchStop)
+	}
+	s.dispatchJobs = nil
+	s.dispatchStop = nil
+}
+
+// submitDispatch runs f on the worker pool, falling back to a goroutine
+// when the queue is full so that events are never dropped.
+func (s *Session) submitDispatch(f func()) {
+	select {
+	case s.dispatchJobs <- f:
+	default:
+		go f()
+	}
+}
+
 // Handles calling permanent and once handlers for an event type.
 func (s *Session) handle(t string, i interface{}) {
+	pool := s.dispatchJobs != nil
+
+	run := func(eh *eventHandlerInstance) func() {
+		return func() { eh.eventHandler.Handle(s, i) }
+	}
+
 	for _, eh := range s.handlers[t] {
-		if s.SyncEvents {
+		switch {
+		case pool:
+			s.submitDispatch(run(eh))
+		case s.SyncEvents:
 			eh.eventHandler.Handle(s, i)
-		} else {
+		default:
 			go eh.eventHandler.Handle(s, i)
 		}
 	}
 
 	if len(s.onceHandlers[t]) > 0 {
 		for _, eh := range s.onceHandlers[t] {
-			if s.SyncEvents {
+			switch {
+			case pool:
+				s.submitDispatch(run(eh))
+			case s.SyncEvents:
 				eh.eventHandler.Handle(s, i)
-			} else {
+			default:
 				go eh.eventHandler.Handle(s, i)
 			}
 		}

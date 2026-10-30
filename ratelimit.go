@@ -18,11 +18,21 @@ type customRateLimit struct {
 	reset    time.Duration
 }
 
+// rateLimitShards is the number of independent lock+map shards. Spreading
+// bucket lookups across shards keeps REST throughput high on busy bots:
+// a single mutex over one map serializes every request's bucket lookup.
+const rateLimitShards = 16
+
+// rateLimitShard is one independent slice of the bucket space.
+type rateLimitShard struct {
+	sync.Mutex
+	buckets map[string]*Bucket
+}
+
 // RateLimiter holds all ratelimit buckets
 type RateLimiter struct {
-	sync.Mutex
 	global           *int64
-	buckets          map[string]*Bucket
+	shards           [rateLimitShards]rateLimitShard
 	globalRateLimit  time.Duration //nolint:unused // reserved for future use
 	customRateLimits []*customRateLimit
 }
@@ -30,9 +40,8 @@ type RateLimiter struct {
 // NewRatelimiter returns a new RateLimiter
 func NewRatelimiter() *RateLimiter {
 
-	return &RateLimiter{
-		buckets: make(map[string]*Bucket),
-		global:  new(int64),
+	r := &RateLimiter{
+		global: new(int64),
 		customRateLimits: []*customRateLimit{
 			{
 				suffix:   "//reactions//",
@@ -41,21 +50,35 @@ func NewRatelimiter() *RateLimiter {
 			},
 		},
 	}
+	for i := range r.shards {
+		r.shards[i].buckets = make(map[string]*Bucket)
+	}
+	return r
+}
+
+// shardFor returns the shard responsible for a bucket key.
+func (r *RateLimiter) shardFor(key string) *rateLimitShard {
+	var h uint32
+	for i := 0; i < len(key); i++ {
+		h = h*31 + uint32(key[i])
+	}
+	return &r.shards[h%rateLimitShards]
 }
 
 // GetBucket retrieves or creates a bucket
 func (r *RateLimiter) GetBucket(key string) *Bucket {
-	r.Lock()
-	defer r.Unlock()
+	shard := r.shardFor(key)
+	shard.Lock()
+	defer shard.Unlock()
 
-	if bucket, ok := r.buckets[key]; ok {
+	if bucket, ok := shard.buckets[key]; ok {
 		return bucket
 	}
 
 	// Opportunistically prune stale buckets so the map does not grow
 	// without bound over a long-lived session.
-	if len(r.buckets) >= maxBucketsBeforePrune {
-		r.pruneBucketsLocked()
+	if len(shard.buckets) >= maxBucketsBeforePrune {
+		r.pruneShardLocked(shard)
 	}
 
 	b := &Bucket{
@@ -72,7 +95,7 @@ func (r *RateLimiter) GetBucket(key string) *Bucket {
 		}
 	}
 
-	r.buckets[key] = b
+	shard.buckets[key] = b
 	return b
 }
 
@@ -80,19 +103,19 @@ func (r *RateLimiter) GetBucket(key string) *Bucket {
 // pruning of expired buckets in GetBucket.
 const maxBucketsBeforePrune = 512
 
-// pruneBucketsLocked removes buckets whose rate limit window has certainly
-// passed and which are not currently in use. It must be called with r's lock
-// held.
-func (r *RateLimiter) pruneBucketsLocked() {
+// pruneShardLocked removes buckets whose rate limit window has certainly
+// passed and which are not currently in use. It must be called with the
+// shard's lock held.
+func (r *RateLimiter) pruneShardLocked(shard *rateLimitShard) {
 	now := time.Now()
-	for key, b := range r.buckets {
+	for key, b := range shard.buckets {
 		// Skip buckets that are locked (in use) by an in-flight request.
 		if !b.TryLock() {
 			continue
 		}
 		expired := (b.reset.IsZero() || b.reset.Before(now)) && b.customRateLimit == nil
 		if expired {
-			delete(r.buckets, key)
+			delete(shard.buckets, key)
 		}
 		b.Unlock()
 	}
@@ -103,9 +126,10 @@ func (r *RateLimiter) pruneBucketsLocked() {
 // mostly useful for tests and for sessions that hit thousands of distinct
 // endpoints.
 func (r *RateLimiter) RemoveBucket(key string) {
-	r.Lock()
-	defer r.Unlock()
-	delete(r.buckets, key)
+	shard := r.shardFor(key)
+	shard.Lock()
+	defer shard.Unlock()
+	delete(shard.buckets, key)
 }
 
 // GetWaitTime returns the duration you should wait for a Bucket
@@ -255,4 +279,24 @@ func (b *Bucket) Release(headers http.Header) error {
 	}
 
 	return nil
+}
+
+// GetBucketIfPresent returns the bucket for the key if it exists, without
+// creating one. It returns nil for unknown keys.
+func (r *RateLimiter) GetBucketIfPresent(key string) *Bucket {
+	shard := r.shardFor(key)
+	shard.Lock()
+	defer shard.Unlock()
+	return shard.buckets[key]
+}
+
+// BucketCount returns the total number of live buckets across all shards.
+func (r *RateLimiter) BucketCount() int {
+	n := 0
+	for i := range r.shards {
+		r.shards[i].Lock()
+		n += len(r.shards[i].buckets)
+		r.shards[i].Unlock()
+	}
+	return n
 }

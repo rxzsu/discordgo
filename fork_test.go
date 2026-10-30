@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -182,30 +183,40 @@ func TestRateLimiterRemoveAndPrune(t *testing.T) {
 	r := NewRatelimiter()
 	r.GetBucket("remove-me")
 	r.RemoveBucket("remove-me")
-	r.bucketsMuCheckRemoved(t, "remove-me")
+	if b := r.GetBucketIfPresent("remove-me"); b != nil {
+		t.Fatal("bucket should have been removed")
+	}
 
-	// Fill the map well past the prune threshold with stale buckets;
-	// pruning runs opportunistically once the map reaches 512 entries.
-	for i := 0; i < 1000; i++ {
+	// Fill the shard well past the prune threshold with stale buckets;
+	// pruning runs opportunistically once a shard reaches 512 entries.
+	for i := 0; i < 12000; i++ {
 		r.GetBucket("expired-" + strconv.Itoa(i))
 	}
-	if len(r.buckets) >= 1000 {
-		t.Fatalf("expected opportunistic pruning to cap bucket growth, got %d", len(r.buckets))
+	total := r.BucketCount()
+	if total >= 12000 {
+		t.Fatalf("expected opportunistic pruning to cap bucket growth, got %d", total)
 	}
-
-	// The most recently created bucket must survive pruning.
-	if _, ok := r.buckets["expired-999"]; !ok {
+	if r.GetBucketIfPresent("expired-11999") == nil {
 		t.Fatal("the most recent bucket must survive pruning")
 	}
 }
 
-// helper keeps the test independent from sync internals of RateLimiter
-func (r *RateLimiter) bucketsMuCheckRemoved(t *testing.T, key string) {
-	t.Helper()
-	r.Lock()
-	defer r.Unlock()
-	if _, ok := r.buckets[key]; ok {
-		t.Fatalf("bucket %q should have been removed", key)
+func TestRateLimiterConcurrentAccess(t *testing.T) {
+	r := NewRatelimiter()
+	var wg sync.WaitGroup
+	for w := 0; w < 16; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				b := r.LockBucket(strconv.Itoa((w*31+i)%64) + "-bucket")
+				_ = b.Release(nil)
+			}
+		}(w)
+	}
+	wg.Wait()
+	if n := r.BucketCount(); n != 64 {
+		t.Fatalf("expected 64 buckets after concurrent access, got %d", n)
 	}
 }
 
