@@ -452,3 +452,96 @@ func TestVoiceHeartbeatLatency(t *testing.T) {
 		t.Fatalf("expected positive latency, got %v", lat)
 	}
 }
+
+func TestShardManagerRemoveHandlerNoPanic(t *testing.T) {
+	// Funcs are uncomparable: the old implementation panicked with
+	// "comparing uncomparable type func(...)" on the first remove() call.
+	m := NewShardManager(ShardingConfig{Token: "Bot test", ShardCount: 2})
+	s0, _ := New("Bot test")
+	m.mu.Lock()
+	m.addSessionLocked(s0)
+	m.mu.Unlock()
+
+	called := 0
+	remove := m.AddHandler(func(s *Session, e *Connect) { called++ })
+	remove() // must not panic
+
+	m.mu.Lock()
+	if len(m.handlers) != 0 {
+		t.Fatalf("expected 0 handlers after remove, got %d", len(m.handlers))
+	}
+	m.mu.Unlock()
+}
+
+func TestThreadMembersUpdateMultiRemove(t *testing.T) {
+	st := NewState()
+	g := &Guild{ID: "g1"}
+	st.guildMap["g1"] = g
+	st.Guilds = []*Guild{g}
+	th := &Channel{ID: "t1", Type: ChannelTypeGuildPublicThread, GuildID: "g1"}
+	th.Members = []*ThreadMember{{UserID: "u1"}, {UserID: "u2"}, {UserID: "u3"}}
+	st.channelMap["t1"] = th
+	g.Channels = []*Channel{th}
+
+	err := st.ThreadMembersUpdate(&ThreadMembersUpdate{
+		ID:             "t1",
+		GuildID:        "g1",
+		RemovedMembers: []string{"u1", "u3"}, // 2+ removals used to panic
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(th.Members) != 1 || th.Members[0].UserID != "u2" {
+		t.Fatalf("unexpected members after removal: %+v", th.Members)
+	}
+}
+
+func TestGuildRemoveCleansIndexes(t *testing.T) {
+	st := NewState()
+	g := &Guild{ID: "g1"}
+	st.guildMap["g1"] = g
+	st.Guilds = []*Guild{g}
+	ch := &Channel{ID: "c1", GuildID: "g1"}
+	st.channelMap["c1"] = ch
+	g.Channels = []*Channel{ch}
+	st.memberMap["g1"] = map[string]*Member{"u1": {User: &User{ID: "u1"}}}
+
+	if err := st.GuildRemove(&Guild{ID: "g1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Channel("c1"); err == nil {
+		t.Fatal("channel of a removed guild must not be found")
+	}
+	if _, err := st.Member("g1", "u1"); err == nil {
+		t.Fatal("member of a removed guild must not be found")
+	}
+	if _, err := st.Guild("g1"); err == nil {
+		t.Fatal("removed guild must not be found")
+	}
+}
+
+func TestOnReadyResetsIndexes(t *testing.T) {
+	st := NewState()
+	// Simulate a previous session with a guild that will be absent from
+	// the new READY.
+	old := &Guild{ID: "old"}
+	st.guildMap["old"] = old
+	st.Guilds = []*Guild{old}
+	oldCh := &Channel{ID: "oldc", GuildID: "old"}
+	st.channelMap["oldc"] = oldCh
+	old.Channels = []*Channel{oldCh}
+
+	err := st.onReady(&Session{StateEnabled: true}, &Ready{Guilds: []*Guild{{ID: "new"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Guild("old"); err == nil {
+		t.Fatal("guild absent from READY must not remain in state")
+	}
+	if _, err := st.Channel("oldc"); err == nil {
+		t.Fatal("channel absent from READY must not remain in state")
+	}
+	if _, err := st.Guild("new"); err != nil {
+		t.Fatalf("new guild must be indexed: %v", err)
+	}
+}

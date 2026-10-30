@@ -46,8 +46,15 @@ type ShardManager struct {
 	Sessions []*Session
 
 	mu       sync.Mutex
-	handlers []interface{}
-	once     []interface{}
+	handlers []*shardHandlerEntry
+	once     []*shardHandlerEntry
+}
+
+// shardHandlerEntry wraps a handler so the manager can remove it by
+// pointer identity. Comparing the handler values themselves would panic
+// at run time for closures (funcs are uncomparable in Go).
+type shardHandlerEntry struct {
+	h interface{}
 }
 
 // NewShardManager returns a ShardManager for the given configuration.
@@ -59,8 +66,9 @@ func NewShardManager(config ShardingConfig) *ShardManager {
 // connected later by Open. The API mirrors Session.AddHandler; the
 // returned removal function detaches the handler everywhere.
 func (m *ShardManager) AddHandler(handler interface{}) func() {
+	entry := &shardHandlerEntry{h: handler}
 	m.mu.Lock()
-	m.handlers = append(m.handlers, handler)
+	m.handlers = append(m.handlers, entry)
 	sessions := m.sessionsLocked()
 	m.mu.Unlock()
 
@@ -73,8 +81,8 @@ func (m *ShardManager) AddHandler(handler interface{}) func() {
 	return func() {
 		once.Do(func() {
 			m.mu.Lock()
-			for i, h := range m.handlers {
-				if h == handler {
+			for i, e := range m.handlers {
+				if e == entry {
 					m.handlers = append(m.handlers[:i], m.handlers[i+1:]...)
 					break
 				}
@@ -90,8 +98,9 @@ func (m *ShardManager) AddHandler(handler interface{}) func() {
 // AddHandlerOnce is AddHandler with Session.AddHandlerOnce semantics:
 // the handler fires once per shard and is then removed.
 func (m *ShardManager) AddHandlerOnce(handler interface{}) func() {
+	entry := &shardHandlerEntry{h: handler}
 	m.mu.Lock()
-	m.once = append(m.once, handler)
+	m.once = append(m.once, entry)
 	sessions := m.sessionsLocked()
 	m.mu.Unlock()
 
@@ -104,8 +113,8 @@ func (m *ShardManager) AddHandlerOnce(handler interface{}) func() {
 	return func() {
 		once.Do(func() {
 			m.mu.Lock()
-			for i, h := range m.once {
-				if h == handler {
+			for i, e := range m.once {
+				if e == entry {
 					m.once = append(m.once[:i], m.once[i+1:]...)
 					break
 				}
@@ -182,6 +191,10 @@ func (m *ShardManager) Open() error {
 			m.mu.Unlock()
 			time.Sleep(delay)
 			m.mu.Lock()
+			// Close may have run while the lock was released.
+			if len(m.Sessions) == 0 {
+				return nil
+			}
 		}
 	}
 
@@ -191,11 +204,11 @@ func (m *ShardManager) Open() error {
 // addSessionLocked registers a session as a shard and attaches every
 // handler registered so far; m.mu must be held.
 func (m *ShardManager) addSessionLocked(s *Session) {
-	for _, h := range m.handlers {
-		s.AddHandler(h)
+	for _, e := range m.handlers {
+		s.AddHandler(e.h)
 	}
-	for _, h := range m.once {
-		s.AddHandlerOnce(h)
+	for _, e := range m.once {
+		s.AddHandlerOnce(e.h)
 	}
 	m.Sessions = append(m.Sessions, s)
 }
@@ -230,11 +243,14 @@ func (m *ShardManager) closeLocked() {
 // ShardForGuildID returns the Session responsible for the given guild.
 // It returns nil before Open or when the manager has no sessions.
 func (m *ShardManager) ShardForGuildID(guildID string) *Session {
-	shard, err := ShardIDForGuild(guildID, len(m.Sessions))
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sessions := m.sessionsLocked()
+	shard, err := ShardIDForGuild(guildID, len(sessions))
 	if err != nil {
 		return nil
 	}
-	return m.Sessions[shard]
+	return sessions[shard]
 }
 
 // ShardIDForGuild calculates the shard ID a guild is assigned to for the

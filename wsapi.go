@@ -34,6 +34,10 @@ var ErrWSAlreadyOpen = errors.New("web socket already opened")
 // that doesn't exist
 var ErrWSNotFound = errors.New("no websocket connection exists")
 
+// wsHandshakeTimeout bounds the READY/RESUMED handshake reads in Open so
+// a stalled gateway connection cannot hold the session lock forever.
+const wsHandshakeTimeout = 30 * time.Second
+
 // ErrWSShardBounds is thrown when you try to use a shard ID that is
 // more than the total shard count
 var ErrWSShardBounds = errors.New("ShardID must be less than ShardCount")
@@ -111,7 +115,11 @@ func (s *Session) Open() error {
 
 	// The first response from Discord should be an Op 10 (Hello) Packet.
 	// When processed by onEvent the heartbeat goroutine will be started.
-	mt, m, err := s.wsConn.Read(context.Background())
+	// The read is bounded: a gateway that accepts the TCP connection but
+	// stalls must not hold s.Lock (and therefore Close) forever.
+	handshakeCtx, cancelHandshake := context.WithTimeout(context.Background(), wsHandshakeTimeout)
+	mt, m, err := s.wsConn.Read(handshakeCtx)
+	cancelHandshake()
 	if err != nil {
 		return err
 	}
@@ -177,7 +185,9 @@ func (s *Session) Open() error {
 	}
 
 	// Now Discord should send us a READY or RESUMED packet.
-	mt, m, err = s.wsConn.Read(context.Background())
+	handshakeCtx2, cancelHandshake2 := context.WithTimeout(context.Background(), wsHandshakeTimeout)
+	mt, m, err = s.wsConn.Read(handshakeCtx2)
+	cancelHandshake2()
 	if err != nil {
 		return err
 	}
@@ -445,13 +455,14 @@ func (s *Session) UpdateStatusComplex(usd UpdateStatusData) (err error) {
 	}
 
 	s.RLock()
-	defer s.RUnlock()
-	if s.wsConn == nil {
+	wsConn := s.wsConn
+	s.RUnlock()
+	if wsConn == nil {
 		return ErrWSNotFound
 	}
 
 	s.wsMutex.Lock()
-	err = wsjson.Write(context.Background(), s.wsConn, updateStatusOp{3, usd})
+	err = wsjson.Write(context.Background(), wsConn, updateStatusOp{3, usd})
 	s.wsMutex.Unlock()
 
 	return
@@ -551,13 +562,14 @@ func (s *Session) RequestGuildMembersBatchList(guildIDs []string, userIDs []stri
 // GatewayWriteStruct allows for sending raw gateway structs over the gateway.
 func (s *Session) GatewayWriteStruct(data interface{}) (err error) {
 	s.RLock()
-	defer s.RUnlock()
-	if s.wsConn == nil {
+	wsConn := s.wsConn
+	s.RUnlock()
+	if wsConn == nil {
 		return ErrWSNotFound
 	}
 
 	s.wsMutex.Lock()
-	err = wsjson.Write(context.Background(), s.wsConn, data)
+	err = wsjson.Write(context.Background(), wsConn, data)
 	s.wsMutex.Unlock()
 
 	return err
@@ -567,13 +579,14 @@ func (s *Session) requestGuildMembers(data requestGuildMembersData) (err error) 
 	s.log(LogInformational, "called")
 
 	s.RLock()
-	defer s.RUnlock()
-	if s.wsConn == nil {
+	wsConn := s.wsConn
+	s.RUnlock()
+	if wsConn == nil {
 		return ErrWSNotFound
 	}
 
 	s.wsMutex.Lock()
-	err = wsjson.Write(context.Background(), s.wsConn, requestGuildMembersOp{8, data})
+	err = wsjson.Write(context.Background(), wsConn, requestGuildMembersOp{8, data})
 	s.wsMutex.Unlock()
 
 	return

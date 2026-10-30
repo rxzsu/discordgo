@@ -158,18 +158,27 @@ func (s *State) GuildRemove(guild *Guild) error {
 		return ErrNilState
 	}
 
-	_, err := s.Guild(guild.ID)
-	if err != nil {
-		return err
-	}
-
 	s.Lock()
 	defer s.Unlock()
 
+	g, ok := s.guildMap[guild.ID]
+	if !ok {
+		return ErrStateNotFound
+	}
+
+	// Clean the per-guild indexes too, otherwise Channel()/Member()
+	// keep returning entities of a departed guild and memberMap leaks.
+	for _, c := range g.Channels {
+		delete(s.channelMap, c.ID)
+	}
+	for _, t := range g.Threads {
+		delete(s.channelMap, t.ID)
+	}
+	delete(s.memberMap, guild.ID)
 	delete(s.guildMap, guild.ID)
 
-	for i, g := range s.Guilds {
-		if g.ID == guild.ID {
+	for i, gi := range s.Guilds {
+		if gi.ID == guild.ID {
 			s.Guilds = append(s.Guilds[:i], s.Guilds[i+1:]...)
 			return nil
 		}
@@ -636,9 +645,13 @@ func (s *State) ThreadMembersUpdate(tmu *ThreadMembersUpdate) error {
 	s.Lock()
 	defer s.Unlock()
 
-	for idx, member := range thread.Members {
+	// Iterate backwards: removing while ranging forward invalidates the
+	// indices of the slice being ranged over (out-of-range panic with
+	// 2+ removed members). RemovedMembers are user IDs, so compare
+	// against UserID (ThreadMember.ID is the thread ID).
+	for idx := len(thread.Members) - 1; idx >= 0; idx-- {
 		for _, removedMember := range tmu.RemovedMembers {
-			if member.ID == removedMember {
+			if thread.Members[idx].UserID == removedMember {
 				thread.Members = append(thread.Members[:idx], thread.Members[idx+1:]...)
 				break
 			}
@@ -667,11 +680,16 @@ func (s *State) ThreadMembersUpdate(tmu *ThreadMembersUpdate) error {
 
 // ThreadMemberUpdate sets or updates member data for the current user.
 func (s *State) ThreadMemberUpdate(mu *ThreadMemberUpdate) error {
-	thread, err := s.Channel(mu.ID)
-	if err != nil {
-		return err
+	s.Lock()
+	defer s.Unlock()
+
+	thread, ok := s.channelMap[mu.ID]
+	if !ok {
+		return ErrStateNotFound
 	}
 
+	// Mutate under the write lock: the *Channel is shared with all
+	// readers of the state maps.
 	thread.Member = mu.ThreadMember
 	return nil
 }
@@ -937,6 +955,13 @@ func (s *State) onReady(se *Session, r *Ready) (err error) {
 	}
 
 	s.Ready = *r
+
+	// Reset the indexes: a fresh READY (e.g. after a non-resumable
+	// reconnect) is the authoritative world state; keeping entries from
+	// the previous session leaves phantom guilds/channels behind.
+	s.guildMap = make(map[string]*Guild)
+	s.channelMap = make(map[string]*Channel)
+	s.memberMap = make(map[string]map[string]*Member)
 
 	for _, g := range s.Guilds {
 		s.guildMap[g.ID] = g

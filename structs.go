@@ -124,6 +124,11 @@ type Session struct {
 	handlers     map[string][]*eventHandlerInstance
 	onceHandlers map[string][]*eventHandlerInstance
 
+	// onceMu exclusively guards mutations of onceHandlers: the drain in
+	// handle() runs while handleEvent holds only handlersMu (RLock,
+	// shared), so map writes there must not use handlersMu.
+	onceMu sync.Mutex
+
 	// dispatch worker pool (active only when DispatchWorkers > 0)
 	dispatchJobs chan func()
 	dispatchStop chan struct{}

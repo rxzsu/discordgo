@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -72,7 +73,7 @@ type VoiceConnection struct {
 	// sessionRecv chan string UNUSED ATM
 
 	aead         cipher.AEAD
-	nonceCounter uint32
+	nonceCounter atomic.Uint32
 
 	op4 voiceOP4
 	op2 voiceOP2
@@ -751,6 +752,7 @@ func (v *VoiceConnection) opusSender(udpConn *net.UDPConn, close <-chan struct{}
 	var timestamp uint32
 	var recvbuf []byte
 	var ok bool
+	var sendbuf []byte
 	udpHeader := make([]byte, 12)
 	nonce := make([]byte, 12)
 
@@ -791,12 +793,16 @@ func (v *VoiceConnection) opusSender(udpConn *net.UDPConn, close <-chan struct{}
 
 		// encrypt the opus data
 		// add incrementing nonce counter as per discord's requirements
-		binary.LittleEndian.PutUint32(nonce[:4], v.nonceCounter)
-		v.nonceCounter++
+		binary.LittleEndian.PutUint32(nonce[:4], v.nonceCounter.Add(1)-1)
 
-		sendbuf := v.aead.Seal(nil, nonce, recvbuf, udpHeader)
-		sendbuf = append(sendbuf, nonce[:4]...) // 4 byte nonce to ciphertext appended
-		sendbuf = append(udpHeader, sendbuf...) // final
+		// Reuse one buffer per sender goroutine: RTP header + ciphertext + nonce.
+		if cap(sendbuf) < len(udpHeader)+len(recvbuf)+16+4 {
+			sendbuf = make([]byte, 0, len(udpHeader)+len(recvbuf)+16+4)
+		}
+		sendbuf = sendbuf[:0]
+		sendbuf = append(sendbuf, udpHeader...)
+		sendbuf = v.aead.Seal(sendbuf, nonce, recvbuf, udpHeader)
+		sendbuf = append(sendbuf, nonce[:4]...) // 4 byte nonce appended to ciphertext
 
 		// block here until we're exactly at the right time :)
 		// Then send rtp audio packet to Discord over UDP
@@ -885,7 +891,10 @@ func (v *VoiceConnection) opusReceiver(udpConn *net.UDPConn, close <-chan struct
 
 		// build a audio packet struct
 		p := Packet{}
-		p.Type = recvbuf[0:2]
+		// Copy the 2 header bytes: recvbuf is reused by the next
+		// udpConn.Read, aliasing it here would corrupt the Packet
+		// before the consumer reads it.
+		p.Type = []byte{recvbuf[0], recvbuf[1]}
 		p.Sequence = binary.BigEndian.Uint16(recvbuf[2:4])
 		p.Timestamp = binary.BigEndian.Uint32(recvbuf[4:8])
 		p.SSRC = binary.BigEndian.Uint32(recvbuf[8:12])

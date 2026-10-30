@@ -83,12 +83,13 @@ func (s *Session) addEventHandlerOnce(eventHandler EventHandler) func() {
 	s.handlersMu.Lock()
 	defer s.handlersMu.Unlock()
 
+	s.onceMu.Lock()
 	if s.onceHandlers == nil {
 		s.onceHandlers = map[string][]*eventHandlerInstance{}
 	}
-
 	ehi := &eventHandlerInstance{eventHandler}
 	s.onceHandlers[eventHandler.Type()] = append(s.onceHandlers[eventHandler.Type()], ehi)
+	s.onceMu.Unlock()
 
 	return func() {
 		s.removeEventHandlerInstance(eventHandler.Type(), ehi)
@@ -155,12 +156,15 @@ func (s *Session) removeEventHandlerInstance(t string, ehi *eventHandlerInstance
 		}
 	}
 
+	// onceHandlers mutations are guarded by onceMu (see handle()).
+	s.onceMu.Lock()
 	onceHandlers := s.onceHandlers[t]
 	for i := range onceHandlers {
 		if onceHandlers[i] == ehi {
 			s.onceHandlers[t] = append(onceHandlers[:i], onceHandlers[i+1:]...)
 		}
 	}
+	s.onceMu.Unlock()
 }
 
 // dispatchQueueSize is the buffer size of the dispatch job queue when
@@ -171,6 +175,8 @@ const dispatchQueueSize = 1024
 // startDispatchWorkers spins up the fixed handler worker pool. It is
 // called from Open when Session.DispatchWorkers > 0.
 func (s *Session) startDispatchWorkers() {
+	s.handlersMu.Lock()
+	defer s.handlersMu.Unlock()
 	s.dispatchJobs = make(chan func(), dispatchQueueSize)
 	s.dispatchStop = make(chan struct{})
 	for i := 0; i < s.DispatchWorkers; i++ {
@@ -189,6 +195,8 @@ func (s *Session) startDispatchWorkers() {
 
 // stopDispatchWorkers shuts the worker pool down.
 func (s *Session) stopDispatchWorkers() {
+	s.handlersMu.Lock()
+	defer s.handlersMu.Unlock()
 	if s.dispatchStop != nil {
 		close(s.dispatchStop)
 	}
@@ -208,7 +216,9 @@ func (s *Session) submitDispatch(f func()) {
 
 // Handles calling permanent and once handlers for an event type.
 func (s *Session) handle(t string, i interface{}) {
+	s.handlersMu.RLock()
 	pool := s.dispatchJobs != nil
+	s.handlersMu.RUnlock()
 
 	run := func(eh *eventHandlerInstance) func() {
 		return func() { eh.eventHandler.Handle(s, i) }
@@ -225,18 +235,26 @@ func (s *Session) handle(t string, i interface{}) {
 		}
 	}
 
-	if len(s.onceHandlers[t]) > 0 {
-		for _, eh := range s.onceHandlers[t] {
-			switch {
-			case pool:
-				s.submitDispatch(run(eh))
-			case s.SyncEvents:
-				eh.eventHandler.Handle(s, i)
-			default:
-				go eh.eventHandler.Handle(s, i)
-			}
-		}
+	// Drain once-handlers exclusively: handleEvent only holds
+	// handlersMu.RLock (shared), so two concurrent events of the same
+	// type could both pass the len check and mutate the map (fatal
+	// concurrent map write) and double-fire the handler.
+	s.onceMu.Lock()
+	onceList := s.onceHandlers[t]
+	if onceList != nil {
 		s.onceHandlers[t] = nil
+	}
+	s.onceMu.Unlock()
+
+	for _, eh := range onceList {
+		switch {
+		case pool:
+			s.submitDispatch(run(eh))
+		case s.SyncEvents:
+			eh.eventHandler.Handle(s, i)
+		default:
+			go eh.eventHandler.Handle(s, i)
+		}
 	}
 }
 
