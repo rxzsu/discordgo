@@ -4,6 +4,42 @@ All notable changes in this fork relative to upstream
 [bwmarrin/discordgo](https://github.com/bwmarrin/discordgo) are documented
 here.
 
+## v1.3.1
+
+Bug-fix release, third audit round (fresh code review + full REST sweep).
+No API changes.
+
+### Fixed
+- state: presences from READY / GUILD_CREATE were never added to the
+  presence index — `presenceAdd` appended duplicates instead of
+  updating in place and `Presence()` missed READY entries. Indexes are
+  now repopulated on READY and GuildAdd.
+- state: message/presence indexes leaked for removed channels and
+  guilds (ChannelRemove/GuildRemove now clean them).
+- state: a stale message-index entry could wedge a channel forever
+  after ChannelAdd replaced the channel with fresh data; stale entries
+  are dropped and the index rebuilt.
+- wsapi: the persistent zlib reader was closed concurrently with the
+  listen goroutine using it (data race) — now synchronized via zMu.
+- wsapi: raw once-handlers (`AddHandlerOnce(func(*Session, *Event))`)
+  were silently skipped by the raw-dispatch fast path; hasHandlers
+  now checks onceHandlers too.
+- wsapi: with goccy/sonic, `Event.RawData` could alias the reused zlib
+  output buffer and be corrupted by the next message; the raw event now
+  owns a copy.
+- sharding: closed Sessions were pinned in memory by handler entries;
+  close drops their removers.
+- REST: `WebhookDeleteWithToken` returned an error on every successful
+  call (204 with empty body was unmarshaled).
+- REST: `Entitlements` sent RFC3339 timestamps where Discord expects
+  entitlement ID snowflakes; timestamps are now converted to snowflake
+  boundary IDs (equivalent, since snowflakes are time-ordered).
+- REST: rate-limit bucket IDs no longer fragment per query string for
+  webhook execute, archived threads, thread members and reactions-
+  remove-emoji; `WebhookMessageEdit` uses a consistent bucket;
+  `EndpointVoice` double-slash fixed; VerificationLevel bounds message
+  corrected (0-4).
+
 ## v1.3.0
 
 ### Added

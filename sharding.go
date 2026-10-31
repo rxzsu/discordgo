@@ -244,6 +244,15 @@ func (m *ShardManager) closeLocked() {
 		if err := s.Close(); err != nil {
 			s.log(LogError, "error closing shard %d, %s", s.ShardID, err)
 		}
+		// Drop the closed session from every handler entry's remover
+		// map so closed Sessions are not pinned in memory for the
+		// manager's lifetime.
+		for _, e := range m.handlers {
+			delete(e.removers, s)
+		}
+		for _, e := range m.once {
+			delete(e.removers, s)
+		}
 	}
 	m.Sessions = nil
 }

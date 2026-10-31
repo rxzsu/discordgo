@@ -614,24 +614,29 @@ func (s *Session) onEvent(messageType int, message []byte) (*Event, error) {
 		// its 32KB window) plus a fresh output buffer on every message.
 		// Only the listen goroutine and Open call onEvent, so these
 		// fields need no extra synchronization.
+		s.zMu.Lock()
 		if s.zr == nil {
 			z, err2 := zlib.NewReader(bytes.NewReader(message))
 			if err2 != nil {
+				s.zMu.Unlock()
 				s.log(LogError, "error uncompressing websocket message, %s", err2)
 				return nil, err2
 			}
 			s.zr = z
 		} else if err2 := s.zr.(zlib.Resetter).Reset(bytes.NewReader(message), nil); err2 != nil {
+			s.zMu.Unlock()
 			s.log(LogError, "error resetting zlib reader, %s", err2)
 			return nil, err2
 		}
 
 		s.zbuf.Reset()
 		if _, err = io.Copy(&s.zbuf, s.zr); err != nil {
+			s.zMu.Unlock()
 			s.log(LogError, "error reading uncompressed websocket message, %s", err)
 			return nil, err
 		}
 		payload = s.zbuf.Bytes()
+		s.zMu.Unlock()
 	} else {
 		payload = message
 	}
@@ -747,6 +752,10 @@ func (s *Session) onEvent(messageType int, message []byte) (*Event, error) {
 	// Skipping the whole dispatch pipeline when no raw handlers are
 	// registered roughly halves the per-event dispatch work.
 	if s.hasHandlers(eventEventType) {
+		// Fast JSON decoders (goccy/sonic) may leave RawData aliasing the
+		// reused zbuf; raw handlers keep the *Event past the next
+		// message, so give it its own copy once on the cold raw path.
+		e.RawData = append(json.RawMessage(nil), e.RawData...)
 		s.handleEvent(eventEventType, e)
 	}
 
@@ -1020,10 +1029,12 @@ func (s *Session) CloseWithCode(closeCode int) (err error) {
 	s.Lock()
 
 	s.stopDispatchWorkers()
+	s.zMu.Lock()
 	if s.zr != nil {
 		_ = s.zr.Close()
 		s.zr = nil
 	}
+	s.zMu.Unlock()
 	s.DataReady = false
 
 	if s.listening != nil {

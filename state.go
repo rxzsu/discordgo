@@ -160,6 +160,20 @@ func (s *State) GuildAdd(guild *Guild) error {
 	s.Guilds = append(s.Guilds, guild)
 	s.guildMap[guild.ID] = guild
 
+	// Index presences carried by GUILD_CREATE, mirroring onReady.
+	if len(guild.Presences) > 0 {
+		pidx := s.presenceIndex[guild.ID]
+		if pidx == nil {
+			pidx = make(map[string]*Presence)
+			s.presenceIndex[guild.ID] = pidx
+		}
+		for _, p := range guild.Presences {
+			if p.User != nil {
+				pidx[p.User.ID] = p
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -181,11 +195,14 @@ func (s *State) GuildRemove(guild *Guild) error {
 	// keep returning entities of a departed guild and memberMap leaks.
 	for _, c := range g.Channels {
 		delete(s.channelMap, c.ID)
+		delete(s.messageIndex, c.ID)
 	}
 	for _, t := range g.Threads {
 		delete(s.channelMap, t.ID)
+		delete(s.messageIndex, t.ID)
 	}
 	delete(s.memberMap, guild.ID)
+	delete(s.presenceIndex, guild.ID)
 	delete(s.guildMap, guild.ID)
 
 	for i, gi := range s.Guilds {
@@ -554,6 +571,16 @@ func (s *State) ChannelAdd(channel *Channel) error {
 		}
 
 		*c = *channel
+		// If fresh channel data replaced the message list, the index for
+		// this channel must be rebuilt to match.
+		if idx := s.messageIndex[channel.ID]; idx != nil {
+			for id := range idx {
+				delete(idx, id)
+			}
+			for _, m := range channel.Messages {
+				idx[m.ID] = m
+			}
+		}
 		return nil
 	}
 
@@ -601,6 +628,7 @@ func (s *State) ChannelRemove(channel *Channel) error {
 			}
 		}
 		delete(s.channelMap, channel.ID)
+		delete(s.messageIndex, channel.ID)
 		return nil
 	}
 
@@ -629,6 +657,9 @@ func (s *State) ChannelRemove(channel *Channel) error {
 	}
 
 	delete(s.channelMap, channel.ID)
+	// Messages of a removed channel are unreachable; dropping the index
+	// entry prevents it from leaking for the session's lifetime.
+	delete(s.messageIndex, channel.ID)
 
 	return nil
 }
@@ -905,6 +936,9 @@ func (s *State) messageRemoveByID(channelID, messageID string) error {
 				return nil
 			}
 		}
+		// Stale index entry (e.g. ChannelAdd replaced the channel with
+		// fresh data): drop it so the channel cannot wedge forever.
+		delete(idx, messageID)
 		return ErrStateNotFound
 	}
 
@@ -1039,6 +1073,22 @@ func (s *State) onReady(se *Session, r *Ready) (err error) {
 	for _, g := range s.Guilds {
 		s.guildMap[g.ID] = g
 		s.createMemberMap(g)
+
+		// READY carries presences: index them, otherwise presenceAdd
+		// would append duplicates instead of updating in place, and
+		// Presence() would miss READY-provided entries entirely.
+		if len(g.Presences) > 0 {
+			pidx := s.presenceIndex[g.ID]
+			if pidx == nil {
+				pidx = make(map[string]*Presence)
+				s.presenceIndex[g.ID] = pidx
+			}
+			for _, p := range g.Presences {
+				if p.User != nil {
+					pidx[p.User.ID] = p
+				}
+			}
+		}
 
 		for _, c := range g.Channels {
 			s.channelMap[c.ID] = c

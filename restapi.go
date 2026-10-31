@@ -33,7 +33,7 @@ import (
 var (
 	ErrJSONUnmarshal           = errors.New("json unmarshal")
 	ErrStatusOffline           = errors.New("You can't set your Status to offline")
-	ErrVerificationLevelBounds = errors.New("VerificationLevel out of bounds, should be between 0 and 3")
+	ErrVerificationLevelBounds = errors.New("VerificationLevel out of bounds, should be between 0 and 4")
 	ErrPruneDaysBounds         = errors.New("the number of days should be more than or equal to 1")
 	ErrGuildNoIcon             = errors.New("guild does not have an icon set")
 	ErrGuildNoSplash           = errors.New("guild does not have a splash set")
@@ -2243,7 +2243,7 @@ func (s *Session) ChannelMessageCrosspost(channelID, messageID string, options .
 func (s *Session) ChannelPollAnswerVoters(channelID, messageID string, answerID int, options ...RequestOption) (voters []*User, err error) {
 	endpoint := EndpointPollAnswerVoters(channelID, messageID, answerID)
 
-	body, err := s.RequestWithBucketID("GET", endpoint, nil, endpoint, options...)
+	body, err := s.RequestWithBucketID("GET", endpoint, nil, BucketIDFromURL(endpoint), options...)
 	if err != nil {
 		return
 	}
@@ -2594,12 +2594,14 @@ func (s *Session) WebhookDelete(webhookID string, options ...RequestOption) (err
 // token    : The auth token for the webhook.
 func (s *Session) WebhookDeleteWithToken(webhookID, token string, options ...RequestOption) (st *Webhook, err error) {
 
-	body, err := s.RequestWithBucketID("DELETE", EndpointWebhookToken(webhookID, token), nil, EndpointWebhookToken("", ""), options...)
+	// Discord returns 204 No Content with an empty body; unmarshaling
+	// the empty body fails, so the response is discarded (same as
+	// WebhookDelete). st is always nil.
+	_, err = s.RequestWithBucketID("DELETE", EndpointWebhookToken(webhookID, token), nil, EndpointWebhookToken("", ""), options...)
 	if err != nil {
 		return
 	}
-
-	err = unmarshal(body, &st)
+	st = nil
 
 	return
 }
@@ -3083,7 +3085,7 @@ func (s *Session) ThreadsArchived(channelID string, before *time.Time, limit int
 	}
 
 	var body []byte
-	body, err = s.RequestWithBucketID("GET", endpoint, nil, endpoint, options...)
+	body, err = s.RequestWithBucketID("GET", endpoint, nil, BucketIDFromURL(endpoint), options...)
 	if err != nil {
 		return
 	}
@@ -3110,7 +3112,7 @@ func (s *Session) ThreadsPrivateArchived(channelID string, before *time.Time, li
 		endpoint += "?" + v.Encode()
 	}
 	var body []byte
-	body, err = s.RequestWithBucketID("GET", endpoint, nil, endpoint, options...)
+	body, err = s.RequestWithBucketID("GET", endpoint, nil, BucketIDFromURL(endpoint), options...)
 	if err != nil {
 		return
 	}
@@ -3137,7 +3139,7 @@ func (s *Session) ThreadsPrivateJoinedArchived(channelID string, before *time.Ti
 		endpoint += "?" + v.Encode()
 	}
 	var body []byte
-	body, err = s.RequestWithBucketID("GET", endpoint, nil, endpoint, options...)
+	body, err = s.RequestWithBucketID("GET", endpoint, nil, BucketIDFromURL(endpoint), options...)
 	if err != nil {
 		return
 	}
@@ -3235,7 +3237,7 @@ func (s *Session) ApplicationCommand(appID, guildID, cmdID string, options ...Re
 		endpoint = EndpointApplicationGuildCommand(appID, guildID, cmdID)
 	}
 
-	body, err := s.RequestWithBucketID("GET", endpoint, nil, endpoint, options...)
+	body, err := s.RequestWithBucketID("GET", endpoint, nil, BucketIDFromURL(endpoint), options...)
 	if err != nil {
 		return
 	}
@@ -3271,7 +3273,7 @@ func (s *Session) GuildApplicationCommandsPermissions(appID, guildID string, opt
 	endpoint := EndpointApplicationCommandsGuildPermissions(appID, guildID)
 
 	var body []byte
-	body, err = s.RequestWithBucketID("GET", endpoint, nil, endpoint, options...)
+	body, err = s.RequestWithBucketID("GET", endpoint, nil, BucketIDFromURL(endpoint), options...)
 	if err != nil {
 		return
 	}
@@ -3288,7 +3290,7 @@ func (s *Session) ApplicationCommandPermissions(appID, guildID, cmdID string, op
 	endpoint := EndpointApplicationCommandPermissions(appID, guildID, cmdID)
 
 	var body []byte
-	body, err = s.RequestWithBucketID("GET", endpoint, nil, endpoint, options...)
+	body, err = s.RequestWithBucketID("GET", endpoint, nil, BucketIDFromURL(endpoint), options...)
 	if err != nil {
 		return
 	}
@@ -3558,7 +3560,7 @@ func (s *Session) GuildOnboarding(guildID string, options ...RequestOption) (onb
 	endpoint := EndpointGuildOnboarding(guildID)
 
 	var body []byte
-	body, err = s.RequestWithBucketID("GET", endpoint, nil, endpoint, options...)
+	body, err = s.RequestWithBucketID("GET", endpoint, nil, BucketIDFromURL(endpoint), options...)
 	if err != nil {
 		return
 	}
@@ -3593,7 +3595,7 @@ func (s *Session) AutoModerationRules(guildID string, options ...RequestOption) 
 	endpoint := EndpointGuildAutoModerationRules(guildID)
 
 	var body []byte
-	body, err = s.RequestWithBucketID("GET", endpoint, nil, endpoint, options...)
+	body, err = s.RequestWithBucketID("GET", endpoint, nil, BucketIDFromURL(endpoint), options...)
 	if err != nil {
 		return
 	}
@@ -3609,7 +3611,7 @@ func (s *Session) AutoModerationRule(guildID, ruleID string, options ...RequestO
 	endpoint := EndpointGuildAutoModerationRule(guildID, ruleID)
 
 	var body []byte
-	body, err = s.RequestWithBucketID("GET", endpoint, nil, endpoint, options...)
+	body, err = s.RequestWithBucketID("GET", endpoint, nil, BucketIDFromURL(endpoint), options...)
 	if err != nil {
 		return
 	}
@@ -3783,6 +3785,16 @@ func (s *Session) SKUs(appID string) (skus []*SKU, err error) {
 	return
 }
 
+// snowflakeFromTime converts a timestamp into a Discord snowflake string
+// (Discord epoch 2015-01-01 in the high 42 bits).
+func snowflakeFromTime(t time.Time) string {
+	ms := t.UnixMilli() - 1420070400000
+	if ms < 0 {
+		ms = 0
+	}
+	return strconv.FormatUint(uint64(ms)<<22, 10)
+}
+
 // Entitlements returns all Entitlements for a given app, active and expired.
 // appID			: The ID of the application.
 // filterOptions	: Optional filter options; otherwise set it to nil.
@@ -3798,10 +3810,13 @@ func (s *Session) Entitlements(appID string, filterOptions *EntitlementFilterOpt
 			queryParams.Set("sku_ids", strings.Join(filterOptions.SkuIDs, ","))
 		}
 		if filterOptions.Before != nil {
-			queryParams.Set("before", filterOptions.Before.Format(time.RFC3339))
+			// Discord expects entitlement ID snowflakes here, not
+			// timestamps. Snowflakes are time-ordered, so deriving the
+			// boundary ID from the timestamp is equivalent.
+			queryParams.Set("before", snowflakeFromTime(*filterOptions.Before))
 		}
 		if filterOptions.After != nil {
-			queryParams.Set("after", filterOptions.After.Format(time.RFC3339))
+			queryParams.Set("after", snowflakeFromTime(*filterOptions.After))
 		}
 		if filterOptions.Limit > 0 {
 			queryParams.Set("limit", strconv.Itoa(filterOptions.Limit))
@@ -3917,7 +3932,7 @@ func (s *Session) Subscription(skuID, subscriptionID, userID string, options ...
 func (s *Session) UserVoiceState(guildID string, userID string, options ...RequestOption) (state *VoiceState, err error) {
 	endpoint := EndpointGuildMemberVoiceState(guildID, userID)
 
-	body, err := s.RequestWithBucketID("GET", endpoint, nil, endpoint, options...)
+	body, err := s.RequestWithBucketID("GET", endpoint, nil, BucketIDFromURL(endpoint), options...)
 	if err != nil {
 		return
 	}

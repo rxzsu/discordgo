@@ -172,8 +172,16 @@ func (s *Session) removeEventHandlerInstance(t string, ehi *eventHandlerInstance
 // (onInterface + handle chain), so the gateway hot path can skip it.
 func (s *Session) hasHandlers(t string) bool {
 	s.handlersMu.RLock()
-	defer s.handlersMu.RUnlock()
-	return len(s.handlers[t]) > 0
+	if len(s.handlers[t]) > 0 {
+		s.handlersMu.RUnlock()
+		return true
+	}
+	s.handlersMu.RUnlock()
+	// Once-only handlers live in onceHandlers and would otherwise be
+	// silently skipped by the raw-dispatch fast path.
+	s.onceMu.Lock()
+	defer s.onceMu.Unlock()
+	return len(s.onceHandlers[t]) > 0
 }
 
 // dispatchQueueSize is the buffer size of the dispatch job queue when

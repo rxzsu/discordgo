@@ -135,8 +135,10 @@ type Session struct {
 	dispatchJobs chan func()
 	dispatchStop chan struct{}
 
-	// reusable zlib decompressor for compressed gateway frames; accessed
-	// only from the listen goroutine and Open.
+	// reusable zlib decompressor for compressed gateway frames; used by
+	// the listen goroutine and Open; CloseWithCode tears it down under
+	// zMu.
+	zMu  sync.Mutex
 	zr   io.ReadCloser
 	zbuf bytes.Buffer
 
