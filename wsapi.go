@@ -38,6 +38,11 @@ var ErrWSNotFound = errors.New("no websocket connection exists")
 // a stalled gateway connection cannot hold the session lock forever.
 const wsHandshakeTimeout = 30 * time.Second
 
+// ErrWSNotReady is returned by Open when the gateway handshake ended
+// with a reconnect request (op 7 / op 9) instead of READY or RESUMED.
+// The reconnect loop treats it like any other Open failure and retries.
+var ErrWSNotReady = errors.New("gateway session is not ready, reconnect requested")
+
 // ErrWSShardBounds is thrown when you try to use a shard ID that is
 // more than the total shard count
 var ErrWSShardBounds = errors.New("ShardID must be less than ShardCount")
@@ -194,6 +199,16 @@ func (s *Session) Open() error {
 	e, err = s.onEvent(int(mt), m)
 	if err != nil {
 		return err
+	}
+	// op 7 (Reconnect) / op 9 (Invalid Session) close and reconnect via
+	// CloseWithCode, which needs s.Lock — held by this very Open call.
+	// Handling them inline here would deadlock the session forever.
+	// Tear the connection down and let the reconnect loop retry.
+	if e.Operation == 7 || e.Operation == 9 {
+		s.log(LogInformational, "received op %d during handshake, closing for reconnect", e.Operation)
+		_ = s.wsConn.CloseNow()
+		s.wsConn = nil
+		return ErrWSNotReady
 	}
 	if e.Type != `READY` && e.Type != `RESUMED` {
 		// This is not fatal, but it does not follow their API documentation.
@@ -656,8 +671,14 @@ func (s *Session) onEvent(messageType int, message []byte) (*Event, error) {
 	// Must respond with a heartbeat packet within 5 seconds
 	if e.Operation == 1 {
 		s.log(LogInformational, "sending heartbeat in response to Op1")
+		s.RLock()
+		wsConn := s.wsConn
+		s.RUnlock()
+		if wsConn == nil {
+			return e, nil
+		}
 		s.wsMutex.Lock()
-		err = wsjson.Write(context.Background(), s.wsConn, heartbeatOp{1, atomic.LoadInt64(s.sequence)})
+		err = wsjson.Write(context.Background(), wsConn, heartbeatOp{1, atomic.LoadInt64(s.sequence)})
 		s.wsMutex.Unlock()
 		if err != nil {
 			s.log(LogError, "error sending heartbeat in response to Op1")
@@ -844,8 +865,14 @@ func (s *Session) ChannelVoiceJoinManual(gID, cID string, mute, deaf bool) (err 
 
 	// Send the request to Discord that we want to join the voice channel
 	data := voiceChannelJoinOp{4, voiceChannelJoinData{&gID, channelID, mute, deaf}}
+	s.RLock()
+	wsConn := s.wsConn
+	s.RUnlock()
+	if wsConn == nil {
+		return ErrWSNotFound
+	}
 	s.wsMutex.Lock()
-	err = wsjson.Write(context.Background(), s.wsConn, data)
+	err = wsjson.Write(context.Background(), wsConn, data)
 	s.wsMutex.Unlock()
 	return
 }
@@ -1028,6 +1055,7 @@ func (s *Session) CloseWithCode(closeCode int) (err error) {
 	s.log(LogInformational, "called")
 	s.Lock()
 
+	wasConnected := s.wsConn != nil || s.listening != nil || s.DataReady
 	s.stopDispatchWorkers()
 	s.zMu.Lock()
 	if s.zr != nil {
@@ -1064,8 +1092,10 @@ func (s *Session) CloseWithCode(closeCode int) (err error) {
 
 	s.Unlock()
 
-	s.log(LogInformational, "emit disconnect event")
-	s.handleEvent(disconnectEventType, &Disconnect{})
+	if wasConnected {
+		s.log(LogInformational, "emit disconnect event")
+		s.handleEvent(disconnectEventType, &Disconnect{})
+	}
 
 	return
 }

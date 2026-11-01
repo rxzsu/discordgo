@@ -232,10 +232,12 @@ func (s *Session) submitDispatch(f func()) {
 }
 
 // Handles calling permanent and once handlers for an event type.
+// handle dispatches one event to its handlers. It must be called with
+// handlersMu (at least) RLock held by the caller; taking the read lock
+// again here would deadlock against a concurrent AddHandler* writer
+// (Go RWMutex writers block new readers, including the nested one).
 func (s *Session) handle(t string, i interface{}) {
-	s.handlersMu.RLock()
 	pool := s.dispatchJobs != nil
-	s.handlersMu.RUnlock()
 
 	run := func(eh *eventHandlerInstance) func() {
 		return func() { eh.eventHandler.Handle(s, i) }

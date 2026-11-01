@@ -4,6 +4,29 @@ All notable changes in this fork relative to upstream
 [bwmarrin/discordgo](https://github.com/bwmarrin/discordgo) are documented
 here.
 
+## v1.4.1
+
+Bug-fix release: final events/dispatch audit round. No API changes.
+
+### Fixed
+- **HIGH** deadlock: op 7 (Reconnect) / op 9 (Invalid Session) received
+  during the `Open` handshake called `CloseWithCode`/`reconnect`, which
+  need the session lock already held by `Open` itself — one failed
+  RESUME bricked the session permanently (Open never returned, Close
+  blocked). The handshake now tears the connection down and returns a
+  retryable `ErrWSNotReady` instead.
+- Deadlock: `handle()` re-acquired the handlers read-lock already held
+  by its caller — a concurrent `AddHandler*` arriving in the tiny
+  window between the two acquisitions blocked both forever. The nested
+  acquisition is gone (the once-list drain keeps its own `onceMu` with
+  a consistent lock order).
+- `Disconnect` fired for sessions that were never connected (e.g. a
+  shard whose `Open` failed during ShardManager startup) or twice for
+  one real loss; guarded by a captured connected flag.
+- op 1 heartbeat reply and `ChannelVoiceJoinManual` wrote `wsConn`
+  without a snapshot — panic race against `Close` on the gateway hot
+  path; both now snapshot under the lock like every other writer.
+
 ## v1.4.0
 
 Fourth audit round (voice deep-dive + interactions/components/webhook/misc sweep), plus gateway-event fixes found by hand.
