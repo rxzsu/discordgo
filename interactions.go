@@ -122,7 +122,7 @@ type ApplicationCommandOption struct {
 	// Minimal value of number/integer option.
 	MinValue *float64 `json:"min_value,omitempty"`
 	// Maximum value of number/integer option.
-	MaxValue float64 `json:"max_value,omitempty"`
+	MaxValue *float64 `json:"max_value,omitempty"`
 	// Minimum length of string option.
 	MinLength *int `json:"min_length,omitempty"`
 	// Maximum length of string option.
@@ -198,6 +198,8 @@ func (t InteractionType) String() string {
 		return "ApplicationCommand"
 	case InteractionMessageComponent:
 		return "MessageComponent"
+	case InteractionApplicationCommandAutocomplete:
+		return "ApplicationCommandAutocomplete"
 	case InteractionModalSubmit:
 		return "ModalSubmit"
 	}

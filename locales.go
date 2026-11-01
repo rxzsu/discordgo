@@ -29,6 +29,7 @@ const (
 	Greek        Locale = "el"
 	Hindi        Locale = "hi"
 	Hungarian    Locale = "hu"
+	Indonesian   Locale = "id"
 	Italian      Locale = "it"
 	Japanese     Locale = "ja"
 	Korean       Locale = "ko"

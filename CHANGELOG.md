@@ -4,6 +4,31 @@ All notable changes in this fork relative to upstream
 [bwmarrin/discordgo](https://github.com/bwmarrin/discordgo) are documented
 here.
 
+## v1.4.0
+
+Fourth audit round (voice deep-dive + interactions/components/webhook/misc sweep), plus gateway-event fixes found by hand.
+
+### Fixed (voice)
+- `opusSender` called `Seal` on a nil AEAD if audio was pushed as soon as `Ready` flipped (OP4 had not arrived) — nil-interface panic killed the whole process; now snapshots the AEAD under the lock and drops frames until OP4 arrives.
+- UDP IP-discovery read had no deadline: a dropped response hung `udpOpen` forever holding the voice lock, bricking `Close`/`Disconnect`/`Speaking`. Now bounded by a 10s deadline.
+- Encryption mode was hardcoded: OP2's offered `modes` and OP4's granted `mode` were never checked — a different negotiated mode meant Discord silently dropped every audio packet. The mode is now validated and a mismatch logs loudly instead of failing silently.
+- `Speaking()` dereferenced `wsConn` between an unlocked nil-check and the write (panic vs reconnect/Close); now snapshotted under the write mutex.
+- RTP timestamp reset to 0 on wrap instead of using the naturally wrapped value — a backward timestamp jump every ~24.9h for continuous senders. Now wraps naturally.
+- `ChannelVoiceJoin` TOCTOU could create two live connections for one guild; lookup+insert are now under one write lock.
+- Voice heartbeat `LastVoiceHeartbeatSent` was written and read under different locks (torn time.Time reads).
+
+### Fixed (events)
+- **Stage instance events never fired**: the library registered `STAGE_INSTANCE_EVENT_*` (no such Discord events); the real `STAGE_INSTANCE_CREATE/UPDATE/DELETE` are now registered. The old struct names remain as deprecated type aliases, so existing code compiles.
+- New events: `GUILD_INCIDENTS_UPDATE`, `VOICE_CHANNEL_STATUS_UPDATE`.
+
+### Fixed (misc)
+- `MessageAllowedMentions` zero value emitted `"parse":null` — which means "use app defaults" (everything pings) — while its documentation implied "suppress all mentions". A custom marshaler now emits `"parse":[]` for the zero value; user-input mention suppression works as documented.
+- `MessageEdit.ID/.Channel` leaked into every edit PATCH body as junk JSON fields; now tagged out.
+- Multipart file names with CR/LF could inject header lines (header injection); stripped.
+- `ApplicationCommandOption.MaxValue` could not serialize the valid bound 0; now a pointer.
+- `Member.AvatarURL` panicked on partial members with a nil `User`; guarded.
+- Added `WebhookTypeApplication` (3), `InteractionResponseLaunchActivity` (10), autocomplete in `InteractionType.String()`, Indonesian locale.
+
 ## v1.3.1
 
 Bug-fix release, third audit round (fresh code review + full REST sweep).

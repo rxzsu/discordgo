@@ -1640,6 +1640,11 @@ func (m *Member) Mention() string {
 //	         if size is an empty string, no size parameter will
 //	         be added to the URL.
 func (m *Member) AvatarURL(size string) string {
+	// Partial members (e.g. in some message payloads) can carry a nil
+	// User; dereferencing it panics.
+	if m.User == nil {
+		return ""
+	}
 	if m.Avatar == "" {
 		return m.User.AvatarURL(size)
 	}

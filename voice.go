@@ -103,13 +103,17 @@ func (v *VoiceConnection) Speaking(b bool) (err error) {
 		Data voiceSpeakingData `json:"d"`
 	}
 
-	if v.wsConn == nil {
+	data := voiceSpeakingOp{5, voiceSpeakingData{b, 0}}
+
+	// Snapshot the connection under wsMutex: Close/4014 may nil v.wsConn
+	// between an unlocked check and the write (nil deref panic).
+	v.wsMutex.Lock()
+	conn := v.wsConn
+	if conn == nil {
+		v.wsMutex.Unlock()
 		return fmt.Errorf("no VoiceConnection websocket")
 	}
-
-	data := voiceSpeakingOp{5, voiceSpeakingData{b, 0}}
-	v.wsMutex.Lock()
-	err = wsjson.Write(context.Background(), v.wsConn, data)
+	err = wsjson.Write(context.Background(), conn, data)
 	v.wsMutex.Unlock()
 
 	v.Lock()
@@ -543,8 +547,10 @@ func (v *VoiceConnection) wsHeartbeat(wsConn *websocket.Conn, close <-chan struc
 	defer ticker.Stop()
 	for {
 		v.log(LogDebug, "sending heartbeat packet")
-		v.wsMutex.Lock()
+		v.Lock()
 		v.LastVoiceHeartbeatSent = time.Now().UTC()
+		v.Unlock()
+		v.wsMutex.Lock()
 		err = wsjson.Write(context.Background(), wsConn, voiceHeartbeatOp{3, int(time.Now().Unix())})
 		v.wsMutex.Unlock()
 		if err != nil {
@@ -645,15 +651,23 @@ func (v *VoiceConnection) udpOpen() (err error) {
 		return
 	}
 
+	// UDP is lossy: a dropped discovery response must not hang udpOpen
+	// (which holds v.Lock) forever and brick the whole connection.
+	if err := v.udpConn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		v.log(LogWarning, "error setting udp read deadline, %s", err)
+	}
+
 	// Create a 74-byte array and listen for the initial handshake response
 	// from Discord.  Once we get it parse the IP and PORT information out
 	// of the response.  This should be our public IP and PORT as Discord
 	// saw us.
 	rb := make([]byte, 74)
 	rlen, _, err := v.udpConn.ReadFromUDP(rb)
+	// The deadline only guards the handshake; audio reads rely on Close.
+	_ = v.udpConn.SetReadDeadline(time.Time{})
 	if err != nil {
-		v.log(LogWarning, "udp read error, %s, %s", addr.String(), err)
-		return
+		v.log(LogWarning, "udp discovery read error, %s, %s", addr.String(), err)
+		return fmt.Errorf("udp discovery read failed: %w", err)
 	}
 
 	if rlen < 74 {
@@ -791,6 +805,17 @@ func (v *VoiceConnection) opusSender(udpConn *net.UDPConn, close <-chan struct{}
 		binary.BigEndian.PutUint16(udpHeader[2:], sequence)
 		binary.BigEndian.PutUint32(udpHeader[4:], timestamp)
 
+		// Snapshot the AEAD under the lock: it is set asynchronously by
+		// the OP4 handler and may still be nil when Ready flips; sealing
+		// with a nil aead would panic the whole process.
+		v.RLock()
+		aead := v.aead
+		v.RUnlock()
+		if aead == nil {
+			// OP4 not arrived yet; drop the frame instead of panicking.
+			continue
+		}
+
 		// encrypt the opus data
 		// add incrementing nonce counter as per discord's requirements
 		binary.LittleEndian.PutUint32(nonce[:4], v.nonceCounter.Add(1)-1)
@@ -801,7 +826,7 @@ func (v *VoiceConnection) opusSender(udpConn *net.UDPConn, close <-chan struct{}
 		}
 		sendbuf = sendbuf[:0]
 		sendbuf = append(sendbuf, udpHeader...)
-		sendbuf = v.aead.Seal(sendbuf, nonce, recvbuf, udpHeader)
+		sendbuf = aead.Seal(sendbuf, nonce, recvbuf, udpHeader)
 		sendbuf = append(sendbuf, nonce[:4]...) // 4 byte nonce appended to ciphertext
 
 		// block here until we're exactly at the right time :)
@@ -826,12 +851,10 @@ func (v *VoiceConnection) opusSender(udpConn *net.UDPConn, close <-chan struct{}
 			sequence++
 		}
 
-		newTS := timestamp + uint32(size)
-		if newTS < timestamp { // uint32 overflow: RTP timestamp wrapped
-			timestamp = 0
-		} else {
-			timestamp = newTS
-		}
+		// RTP timestamps wrap naturally modulo 2^32; resetting to 0
+		// instead of using the wrapped value would collapse the
+		// inter-packet delta every ~24.9h and glitch the decoder.
+		timestamp += uint32(size)
 	}
 }
 

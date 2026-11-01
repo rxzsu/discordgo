@@ -788,16 +788,16 @@ func (s *Session) ChannelVoiceJoin(gID, cID string, mute, deaf bool) (voice *Voi
 
 	s.log(LogInformational, "called")
 
-	s.RLock()
-	voice, _ = s.VoiceConnections[gID]
-	s.RUnlock()
-
+	// Lookup and insert under one write lock: a gap would let two
+	// concurrent joins (user call + reconnect) create two connections
+	// for the same guild, orphaning one with live goroutines.
+	s.Lock()
+	voice = s.VoiceConnections[gID]
 	if voice == nil {
 		voice = &VoiceConnection{}
-		s.Lock()
 		s.VoiceConnections[gID] = voice
-		s.Unlock()
 	}
+	s.Unlock()
 
 	voice.Lock()
 	voice.GuildID = gID

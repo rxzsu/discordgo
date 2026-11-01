@@ -280,8 +280,8 @@ type MessageEdit struct {
 	// Overwrite existing attachments
 	Attachments *[]*MessageAttachment `json:"attachments,omitempty"`
 
-	ID      string
-	Channel string
+	ID      string `json:"-"`
+	Channel string `json:"-"`
 
 	// TODO: Remove this when compatibility is not required.
 	Embed *MessageEmbed `json:"-"`
@@ -327,6 +327,22 @@ const (
 	AllowedMentionTypeUsers    AllowedMentionType = "users"
 	AllowedMentionTypeEveryone AllowedMentionType = "everyone"
 )
+
+// MarshalJSON implements a custom marshaler: a nil Parse field means
+// "suppress all mention types" ("parse":[]), not "use the application
+// defaults" ("parse":null), which the zero value would otherwise
+// silently produce and which would let user input ping everyone.
+func (m MessageAllowedMentions) MarshalJSON() ([]byte, error) {
+	type allowedMentions MessageAllowedMentions
+	am := struct {
+		Parse []AllowedMentionType `json:"parse"`
+		allowedMentions
+	}{Parse: m.Parse, allowedMentions: allowedMentions(m)}
+	if am.Parse == nil {
+		am.Parse = []AllowedMentionType{}
+	}
+	return Marshal(&am)
+}
 
 // MessageAllowedMentions allows the user to specify which mentions
 // Discord is allowed to parse in this message. This is useful when

@@ -34,6 +34,8 @@ func init() {
 
 var (
 	integerOptionMinValue          = 1.0
+	integerOptionMaxValue          = 10.0
+	numberOptionMaxValue           = 10.1
 	dmPermission                   = false
 	defaultMemberPermissions int64 = discordgo.PermissionManageGuild
 
@@ -110,14 +112,14 @@ var (
 					Name:        "integer-option",
 					Description: "Integer option",
 					MinValue:    &integerOptionMinValue,
-					MaxValue:    10,
+					MaxValue:    &integerOptionMaxValue,
 					Required:    true,
 				},
 				{
 					Type:        discordgo.ApplicationCommandOptionNumber,
 					Name:        "number-option",
 					Description: "Float option",
-					MaxValue:    10.1,
+					MaxValue:    &numberOptionMaxValue,
 					Required:    true,
 				},
 				{

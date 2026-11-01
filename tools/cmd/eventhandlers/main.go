@@ -79,6 +79,12 @@ func main() {
 
 	names := []string{}
 	for object := range parsedFile.Scope.Objects {
+		// Skip deprecated type aliases of renamed events: they share the
+		// underlying type with the canonical struct and would produce
+		// duplicate type-switch cases and wrong event strings.
+		if object == "StageInstanceEventCreate" || object == "StageInstanceEventUpdate" || object == "StageInstanceEventDelete" {
+			continue
+		}
 		names = append(names, object)
 	}
 	sort.Strings(names)
@@ -105,6 +111,10 @@ func constCase(name string) string {
 func isDiscordEvent(name string) bool {
 	switch {
 	case name == "Connect", name == "Disconnect", name == "Event", name == "RateLimit", name == "Interface":
+		return false
+	// Deprecated type aliases of the StageInstance events; they must not
+	// generate their own (wrong) event types.
+	case name == "StageInstanceEventCreate", name == "StageInstanceEventUpdate", name == "StageInstanceEventDelete":
 		return false
 	default:
 		return true

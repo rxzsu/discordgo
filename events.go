@@ -2,6 +2,7 @@ package discordgo
 
 import (
 	"encoding/json"
+	"time"
 )
 
 // This file contains all the possible structs that can be
@@ -150,6 +151,19 @@ type GuildSoundboardSoundDelete struct {
 	GuildID string `json:"guild_id"`
 }
 
+// GuildIncidentsUpdate is the data for a GUILD_INCIDENTS_UPDATE event.
+type GuildIncidentsUpdate struct {
+	Description string     `json:"description,omitempty"`
+	End         *time.Time `json:"end,omitempty"`
+}
+
+// VoiceChannelStatusUpdate is the data for a VOICE_CHANNEL_STATUS_UPDATE event.
+type VoiceChannelStatusUpdate struct {
+	Status    string `json:"status"`
+	ChannelID string `json:"channel_id"`
+	GuildID   string `json:"guild_id"`
+}
+
 // GuildBanAdd is the data for a GuildBanAdd event.
 type GuildBanAdd struct {
 	User    *User  `json:"user"`
@@ -225,18 +239,30 @@ type GuildIntegrationsUpdate struct {
 	GuildID string `json:"guild_id"`
 }
 
-// StageInstanceEventCreate is the data for a StageInstanceEventCreate event.
-type StageInstanceEventCreate struct {
+// StageInstanceEventCreate is a deprecated alias of StageInstanceCreate,
+// kept for backward compatibility. The Discord event is
+// STAGE_INSTANCE_CREATE.
+type StageInstanceEventCreate = StageInstanceCreate
+
+// StageInstanceCreate is the data for a STAGE_INSTANCE_CREATE event.
+type StageInstanceCreate struct {
 	*StageInstance
 }
 
-// StageInstanceEventUpdate is the data for a StageInstanceEventUpdate event.
-type StageInstanceEventUpdate struct {
+// StageInstanceEventUpdate is a deprecated alias of StageInstanceUpdate,
+// kept for backward compatibility.
+type StageInstanceEventUpdate = StageInstanceUpdate
+
+// StageInstanceUpdate is the data for a STAGE_INSTANCE_UPDATE event.
+type StageInstanceUpdate struct {
 	*StageInstance
 }
 
-// StageInstanceEventDelete is the data for a StageInstanceEventDelete event.
-type StageInstanceEventDelete struct {
+// StageInstanceEventDelete is a deprecated alias of StageInstanceDelete,
+// kept for backward compatibility.
+type StageInstanceEventDelete = StageInstanceDelete
+
+type StageInstanceDelete struct {
 	*StageInstance
 }
 

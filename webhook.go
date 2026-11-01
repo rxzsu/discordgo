@@ -21,7 +21,9 @@ type WebhookType int
 
 // Valid WebhookType values
 const (
-	WebhookTypeIncoming        WebhookType = 1
+	WebhookTypeIncoming WebhookType = 1
+	// WebhookTypeApplication is the webhook type used for interactions.
+	WebhookTypeApplication     WebhookType = 3
 	WebhookTypeChannelFollower WebhookType = 2
 )
 
