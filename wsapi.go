@@ -59,6 +59,16 @@ type resumePacket struct {
 // Open creates a websocket connection to Discord.
 // See: https://discord.com/developers/docs/topics/gateway#connecting
 func (s *Session) Open() error {
+	return s.OpenContext(context.Background())
+}
+
+// OpenContext connects to Discord using ctx for gateway discovery, dialing,
+// and the initial handshake. After it returns successfully, cancelling ctx
+// does not close the session; call Close to disconnect.
+func (s *Session) OpenContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	s.log(LogInformational, "called")
 
 	var err error
@@ -67,6 +77,9 @@ func (s *Session) Open() error {
 	// being called while Open is still running.
 	s.Lock()
 	defer s.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	// If the websock is already open, bail out here.
 	if s.wsConn != nil {
@@ -82,7 +95,7 @@ func (s *Session) Open() error {
 		gateway = s.resumeGatewayURL
 	} else {
 		if s.gateway == "" {
-			s.gateway, err = s.Gateway()
+			s.gateway, err = s.Gateway(WithContext(ctx))
 			if err != nil {
 				return err
 			}
@@ -96,7 +109,7 @@ func (s *Session) Open() error {
 
 	// Connect to the Gateway
 	s.log(LogInformational, "connecting to gateway %s", gateway)
-	dialCtx, cancelDial := context.WithTimeout(context.Background(), s.DialTimeout)
+	dialCtx, cancelDial := context.WithTimeout(ctx, s.DialTimeout)
 	defer cancelDial()
 	header := http.Header{}
 	header.Add("accept-encoding", "zlib")
@@ -112,7 +125,7 @@ func (s *Session) Open() error {
 		// because of this, all code below must set err to the error
 		// when exiting with an error :)  Maybe someone has a better
 		// way :)
-		if err != nil {
+		if err != nil && s.wsConn != nil {
 			_ = s.wsConn.CloseNow()
 			s.wsConn = nil
 		}
@@ -122,7 +135,7 @@ func (s *Session) Open() error {
 	// When processed by onEvent the heartbeat goroutine will be started.
 	// The read is bounded: a gateway that accepts the TCP connection but
 	// stalls must not hold s.Lock (and therefore Close) forever.
-	handshakeCtx, cancelHandshake := context.WithTimeout(context.Background(), wsHandshakeTimeout)
+	handshakeCtx, cancelHandshake := context.WithTimeout(ctx, wsHandshakeTimeout)
 	mt, m, err := s.wsConn.Read(handshakeCtx)
 	cancelHandshake()
 	if err != nil {
@@ -149,9 +162,9 @@ func (s *Session) Open() error {
 	if s.sessionID == "" && sequence == 0 {
 
 		// Send Op 2 Identity Packet
-		err = s.identify()
+		err = s.identifyContext(ctx)
 		if err != nil {
-			err = fmt.Errorf("error sending identify packet to gateway, %s, %s", s.gateway, err)
+			err = fmt.Errorf("error sending identify packet to gateway, %s: %w", s.gateway, err)
 			return err
 		}
 
@@ -166,10 +179,10 @@ func (s *Session) Open() error {
 
 		s.log(LogInformational, "sending resume packet to gateway")
 		s.wsMutex.Lock()
-		err = wsjson.Write(context.Background(), s.wsConn, p)
+		err = wsjson.Write(ctx, s.wsConn, p)
 		s.wsMutex.Unlock()
 		if err != nil {
-			err = fmt.Errorf("error sending gateway resume packet, %s, %s", s.gateway, err)
+			err = fmt.Errorf("error sending gateway resume packet, %s: %w", s.gateway, err)
 			return err
 		}
 
@@ -190,7 +203,7 @@ func (s *Session) Open() error {
 	}
 
 	// Now Discord should send us a READY or RESUMED packet.
-	handshakeCtx2, cancelHandshake2 := context.WithTimeout(context.Background(), wsHandshakeTimeout)
+	handshakeCtx2, cancelHandshake2 := context.WithTimeout(ctx, wsHandshakeTimeout)
 	mt, m, err = s.wsConn.Read(handshakeCtx2)
 	cancelHandshake2()
 	if err != nil {
@@ -334,6 +347,11 @@ func (s *Session) heartbeat(wsConn *websocket.Conn, listening <-chan interface{}
 	defer ticker.Stop()
 
 	for {
+		select {
+		case <-listening:
+			return
+		default:
+		}
 		s.RLock()
 		last := s.LastHeartbeatAck
 		s.RUnlock()
@@ -344,6 +362,13 @@ func (s *Session) heartbeat(wsConn *websocket.Conn, listening <-chan interface{}
 		err = wsjson.Write(context.Background(), wsConn, heartbeatOp{1, sequence})
 		s.wsMutex.Unlock()
 		if err != nil || time.Since(last) > (heartbeatInterval*FailedHeartbeatAcks) {
+			// A heartbeat may have been scheduled just before Close. Never
+			// let that old connection resurrect a deliberately closed session.
+			select {
+			case <-listening:
+				return
+			default:
+			}
 			if err != nil {
 				s.log(LogError, "error sending heartbeat to gateway %s, %s", s.gateway, err)
 			} else {
@@ -354,6 +379,10 @@ func (s *Session) heartbeat(wsConn *websocket.Conn, listening <-chan interface{}
 			return
 		}
 		s.Lock()
+		if s.wsConn != wsConn || s.listening != listening {
+			s.Unlock()
+			return
+		}
 		s.DataReady = true
 		s.Unlock()
 
@@ -949,6 +978,10 @@ type identifyOp struct {
 
 // identify sends the identify packet to the gateway
 func (s *Session) identify() error {
+	return s.identifyContext(context.Background())
+}
+
+func (s *Session) identifyContext(ctx context.Context) error {
 	s.log(LogDebug, "called")
 
 	// TODO: This is a temporary block of code to help
@@ -979,7 +1012,7 @@ func (s *Session) identify() error {
 	op := identifyOp{2, s.Identify}
 	s.log(LogDebug, "Identify Packet: \n%#v", op)
 	s.wsMutex.Lock()
-	err := wsjson.Write(context.Background(), s.wsConn, op)
+	err := wsjson.Write(ctx, s.wsConn, op)
 	s.wsMutex.Unlock()
 
 	return err

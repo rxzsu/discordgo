@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
@@ -24,6 +25,9 @@ func main() {
 		Token: token,
 		// ShardCount 0 = use the recommended count from the API.
 		ShardCount: 0,
+		ConfigureSession: func(s *discordgo.Session) {
+			s.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages
+		},
 	})
 
 	m.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
@@ -37,14 +41,14 @@ func main() {
 		fmt.Printf("shard %d: message in %s: %s\n", s.ShardID, m.ChannelID, m.Content)
 	})
 
-	if err := m.Open(); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := m.OpenContext(ctx); err != nil {
 		fmt.Println("error opening shards:", err)
 		return
 	}
 	defer m.Close()
 
 	fmt.Println("all shards connected. Press CTRL-C to exit.")
-	sc := make(chan os.Signal, 1)
-	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
-	<-sc
+	<-ctx.Done()
 }

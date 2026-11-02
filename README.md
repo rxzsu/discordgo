@@ -32,6 +32,14 @@ differences from upstream.
 - **ShardManager** (`sharding.go`): multi-shard gateway support with
   shared handlers, automatic shard count/identify-delay discovery —
   upstream has none. See `examples/sharding`.
+- **Cancellable startup**: `Session.OpenContext(ctx)` and
+  `ShardManager.OpenContext(ctx)` cancel gateway discovery and handshakes;
+  the manager also cancels identify delays and closes partially started
+  shards. Existing `Open()` methods remain available. After a successful
+  startup, use `Close()` to disconnect.
+- **Per-shard configuration**: `ShardingConfig.ConfigureSession` sets
+  intents, HTTP clients and other session options before connecting. It
+  also configures the temporary session used for gateway discovery.
 - **`GuildBulkBan`**: ban up to 200 users in a single API call.
 - **Stickers, guild widget, soundboard**: full REST coverage of APIs
   that upstream defined endpoints for but never implemented methods for.

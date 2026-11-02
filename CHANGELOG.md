@@ -4,6 +4,29 @@ All notable changes in this fork relative to upstream
 [bwmarrin/discordgo](https://github.com/bwmarrin/discordgo) are documented
 here.
 
+## Unreleased
+
+### Added
+- `Session.OpenContext` and `ShardManager.OpenContext` for cancellable
+  gateway discovery, dialing, handshakes and shard startup delays.
+- `ShardingConfig.ConfigureSession` to configure each shard and the
+  gateway discovery session before connecting.
+
+### Fixed
+- REST request timeouts now include bucket waits and all retries.
+  Context cancellation also interrupts waiting for a busy bucket mutex.
+- Dispatch workers retain their own channels and exit after shutdown.
+- Snowflake parsing rejects uint64 overflow instead of wrapping to zero.
+- Shard manager startup no longer holds its mutex during network calls;
+  `Close` cancels an in-progress startup and concurrent opens are rejected.
+- Raw bot tokens are prefixed with `Bot ` by the shard manager, matching
+  its documented configuration contract.
+- Heartbeat workers stop when their connection has already been closed,
+  avoiding a reconnect caused by a delayed heartbeat after shutdown.
+
+### Changed
+- Guild-to-shard lookups no longer allocate or copy the session slice.
+
 ## v1.4.1
 
 Bug-fix release: final events/dispatch audit round. No API changes.

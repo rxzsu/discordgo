@@ -9,7 +9,10 @@
 package discordgo
 
 import (
+	"context"
+	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -32,6 +35,11 @@ type ShardingConfig struct {
 	// DefaultIdentifyDelay divided by the gateway's reported max
 	// concurrency is used.
 	IdentifyDelay time.Duration
+
+	// ConfigureSession is called before gateway discovery and before opening
+	// each shard. Use it to set intents, the HTTP client, or other settings.
+	// It runs without the manager lock; it must not modify ShardID/ShardCount.
+	ConfigureSession func(*Session)
 }
 
 // ShardManager manages a set of gateway shards, each backed by its own
@@ -45,9 +53,11 @@ type ShardManager struct {
 	// Open has been called.
 	Sessions []*Session
 
-	mu       sync.Mutex
-	handlers []*shardHandlerEntry
-	once     []*shardHandlerEntry
+	opening    bool
+	openCancel context.CancelFunc
+	mu         sync.Mutex
+	handlers   []*shardHandlerEntry
+	once       []*shardHandlerEntry
 }
 
 // shardHandlerEntry wraps a handler so the manager can remove it by
@@ -147,22 +157,67 @@ func (m *ShardManager) sessionsLocked() []*Session {
 // Shards are connected sequentially, delaying by the identify delay
 // between connections to respect Discord's identify rate limits.
 func (m *ShardManager) Open() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	return m.OpenContext(context.Background())
+}
 
-	if len(m.Sessions) > 0 {
+// OpenContext connects all shards, respecting ctx during gateway discovery,
+// connection handshakes and identify delays. Cancellation or failure closes
+// any shards already started. Close also cancels an in-progress startup.
+// After success ctx no longer controls the connected sessions.
+func (m *ShardManager) OpenContext(ctx context.Context) (err error) {
+	m.mu.Lock()
+	if m.opening || len(m.Sessions) > 0 {
+		m.mu.Unlock()
 		return ErrWSAlreadyOpen
 	}
+	if err := ctx.Err(); err != nil {
+		m.mu.Unlock()
+		return err
+	}
+	config := m.Config
+	if config.ShardCount < 0 || config.IdentifyDelay < 0 {
+		m.mu.Unlock()
+		return fmt.Errorf("ShardCount and IdentifyDelay must be nonnegative")
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	m.opening, m.openCancel = true, cancel
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if err == nil {
+			err = ctx.Err()
+		}
+		cancel()
+		if err != nil {
+			m.closeLocked()
+		}
+		m.opening, m.openCancel = false, nil
+	}()
 
-	count := m.Config.ShardCount
-	delay := m.Config.IdentifyDelay
+	count, delay := config.ShardCount, config.IdentifyDelay
+	token := config.Token
+	if token != "" && !strings.HasPrefix(token, "Bot ") {
+		token = "Bot " + token
+	}
+	newSession := func(id int) (*Session, error) {
+		s, err := New(token)
+		if err != nil {
+			return nil, err
+		}
+		s.ShardID, s.ShardCount = id, count
+		if config.ConfigureSession != nil {
+			config.ConfigureSession(s)
+		}
+		return s, nil
+	}
 
 	if count == 0 || delay == 0 {
-		probe, err := New(m.Config.Token)
+		probe, err := newSession(0)
 		if err != nil {
 			return err
 		}
-		gw, err := probe.GatewayBot()
+		gw, err := probe.GatewayBot(WithContext(ctx))
 		if err != nil {
 			return err
 		}
@@ -178,34 +233,30 @@ func (m *ShardManager) Open() error {
 	}
 
 	for i := 0; i < count; i++ {
-		s, err := New(m.Config.Token)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		s, err := newSession(i)
 		if err != nil {
-			m.closeLocked()
 			return err
 		}
-		s.ShardID = i
-		s.ShardCount = count
-
-		m.addSessionLocked(s)
-
-		if err := s.Open(); err != nil {
-			m.closeLocked()
+		m.mu.Lock()
+		if err = ctx.Err(); err == nil {
+			m.addSessionLocked(s)
+		}
+		m.mu.Unlock()
+		if err != nil {
 			return err
 		}
-
+		if err := s.OpenContext(ctx); err != nil {
+			return err
+		}
 		if i < count-1 {
-			// Release the manager lock while waiting so Close and
-			// AddHandler stay responsive during startup.
-			m.mu.Unlock()
-			time.Sleep(delay)
-			m.mu.Lock()
-			// Close may have run while the lock was released.
-			if len(m.Sessions) == 0 {
-				return nil
+			if err := sleepCtx(ctx, delay); err != nil {
+				return err
 			}
 		}
 	}
-
 	return nil
 }
 
@@ -236,6 +287,9 @@ func identifyDelayForConcurrency(concurrency int) time.Duration {
 func (m *ShardManager) Close() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.openCancel != nil {
+		m.openCancel()
+	}
 	m.closeLocked()
 }
 
