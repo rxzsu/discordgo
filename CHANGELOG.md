@@ -13,6 +13,15 @@ here.
   gateway discovery session before connecting.
 
 ### Fixed
+- Rate-limit cache pruning preserves bucket identity while callers hold
+  references; active cooldowns survive direct reuse and garbage collection.
+  `RemoveBucket` now retains locked buckets and active windows.
+- Global and local cooldowns use the longer delay and are rechecked after
+  waiting. Concurrent responses cannot shorten a global cooldown.
+- HTTP 429 bodies update shared local/global limits before releasing the
+  bucket, including when automatic retries are disabled. `Retry-After`
+  headers and sub-millisecond durations are honored; invalid durations
+  are rejected.
 - REST request timeouts now include bucket waits and all retries.
   Context cancellation also interrupts waiting for a busy bucket mutex.
 - Dispatch workers retain their own channels and exit after shutdown.

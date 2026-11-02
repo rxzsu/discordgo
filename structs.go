@@ -16,7 +16,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"regexp"
 	"sync"
@@ -1701,15 +1700,17 @@ const (
 // A TooManyRequests struct holds information received from Discord
 // when receiving a HTTP 429 response.
 type TooManyRequests struct {
+	Global     bool          `json:"global"`
 	Bucket     string        `json:"bucket"`
 	Message    string        `json:"message"`
 	RetryAfter time.Duration `json:"retry_after"`
 }
 
-// UnmarshalJSON helps support translation of a milliseconds-based float
+// UnmarshalJSON helps support translation of a seconds-based float
 // into a time.Duration on TooManyRequests.
 func (t *TooManyRequests) UnmarshalJSON(b []byte) error {
 	u := struct {
+		Global     bool    `json:"global"`
 		Bucket     string  `json:"bucket"`
 		Message    string  `json:"message"`
 		RetryAfter float64 `json:"retry_after"`
@@ -1719,10 +1720,14 @@ func (t *TooManyRequests) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
+	delay, err := durationFromSeconds(u.RetryAfter)
+	if err != nil {
+		return err
+	}
+	t.Global = u.Global
 	t.Bucket = u.Bucket
 	t.Message = u.Message
-	whole, frac := math.Modf(u.RetryAfter)
-	t.RetryAfter = time.Duration(whole)*time.Second + time.Duration(frac*1000)*time.Millisecond
+	t.RetryAfter = delay
 	return nil
 }
 

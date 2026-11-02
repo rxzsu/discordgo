@@ -326,14 +326,32 @@ func (s *Session) requestWithConfig(cfg *RequestConfig, bucket *Bucket, sequence
 		}
 	}()
 
-	err = bucket.Release(resp.Header)
-	if err != nil {
-		return
-	}
-
-	response, err = io.ReadAll(resp.Body)
-	if err != nil {
-		return
+	var limited *TooManyRequests
+	if resp.StatusCode == http.StatusTooManyRequests {
+		// Keep the bucket locked until the 429 body updates shared limits.
+		response, err = io.ReadAll(resp.Body)
+		if err == nil {
+			var decoded TooManyRequests
+			if err = Unmarshal(response, &decoded); err == nil {
+				limited = &decoded
+			}
+		}
+		releaseErr := bucket.release(resp.Header, limited)
+		if err != nil {
+			return nil, err
+		}
+		if releaseErr != nil {
+			return nil, releaseErr
+		}
+	} else {
+		// Successful responses do not need to serialize body downloads.
+		if err = bucket.Release(resp.Header); err != nil {
+			return nil, err
+		}
+		response, err = io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if s.Debug {
@@ -372,30 +390,19 @@ func (s *Session) requestWithConfig(cfg *RequestConfig, bucket *Bucket, sequence
 			err = fmt.Errorf("Exceeded Max retries HTTP %s, %s", resp.Status, response)
 		}
 	case http.StatusTooManyRequests:
-		rl := TooManyRequests{}
-		err = Unmarshal(response, &rl)
-		if err != nil {
-			s.log(LogError, "rate limit unmarshal error, %s", err)
-			return
-		}
+		rl := limited
 
 		if cfg.ShouldRetryOnRateLimit {
 			s.log(LogInformational, "Rate Limiting %s, retry in %v", urlStr, rl.RetryAfter)
-			s.handleEvent(rateLimitEventType, &RateLimit{TooManyRequests: &rl, URL: urlStr})
+			s.handleEvent(rateLimitEventType, &RateLimit{TooManyRequests: rl, URL: urlStr})
 
-			// Wait out the rate limit, but abort early if the request
-			// context is cancelled or times out.
-			if sleepErr := sleepCtx(req.Context(), rl.RetryAfter); sleepErr != nil {
-				err = sleepErr
-				return
-			}
-
+			// The shared bucket/global state now supplies the retry delay.
 			if _, err = s.Ratelimiter.LockBucketObjectContext(req.Context(), bucket); err != nil {
 				return nil, err
 			}
 			response, err = s.requestWithConfig(cfg, bucket, sequence)
 		} else {
-			err = &RateLimitError{&RateLimit{TooManyRequests: &rl, URL: urlStr}}
+			err = &RateLimitError{&RateLimit{TooManyRequests: rl, URL: urlStr}}
 		}
 	case http.StatusUnauthorized:
 		if !strings.HasPrefix(s.Token, "Bot ") {

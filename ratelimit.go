@@ -2,6 +2,7 @@ package discordgo
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"net/http"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"weak"
 )
 
 // customRateLimit holds information for defining a custom rate limit
@@ -26,7 +28,9 @@ const rateLimitShards = 16
 // rateLimitShard is one independent slice of the bucket space.
 type rateLimitShard struct {
 	sync.Mutex
-	buckets map[string]*Bucket
+	buckets               map[string]*Bucket
+	retired               map[string]weak.Pointer[Bucket]
+	retirementsSinceSweep int
 }
 
 // RateLimiter holds all ratelimit buckets
@@ -81,10 +85,22 @@ func (r *RateLimiter) GetBucket(key string) *Bucket {
 		r.pruneShardLocked(shard)
 	}
 
+	// A caller may still hold an expired bucket after it leaves the strong
+	// cache. Reuse that object while it is alive so it never has two locks.
+	if ref, ok := shard.retired[key]; ok {
+		if b := ref.Value(); b != nil {
+			delete(shard.retired, key)
+			shard.buckets[key] = b
+			b.retired.Store(false)
+			return b
+		}
+		delete(shard.retired, key)
+	}
 	b := &Bucket{
 		Remaining: 1,
 		Key:       key,
 		global:    r.global,
+		shard:     shard,
 	}
 
 	// Check if there is a custom ratelimit set for this bucket ID.
@@ -115,38 +131,64 @@ func (r *RateLimiter) pruneShardLocked(shard *rateLimitShard) {
 		}
 		expired := (b.reset.IsZero() || b.reset.Before(now)) && b.customRateLimit == nil
 		if expired {
-			delete(shard.buckets, key)
+			r.retireBucketLocked(shard, key, b)
 		}
 		b.Unlock()
 	}
+	r.sweepRetiredLocked(shard)
 }
 
-// RemoveBucket removes a bucket from the rate limiter, forcing the next
-// request to its endpoint to start with a fresh (optimistic) limit. This is
-// mostly useful for tests and for sessions that hit thousands of distinct
-// endpoints.
+func (r *RateLimiter) sweepRetiredLocked(shard *rateLimitShard) {
+	for key, ref := range shard.retired {
+		if ref.Value() == nil {
+			delete(shard.retired, key)
+		}
+	}
+	shard.retirementsSinceSweep = 0
+}
+
+func (r *RateLimiter) retireBucketLocked(shard *rateLimitShard, key string, b *Bucket) {
+	if shard.retired == nil {
+		shard.retired = make(map[string]weak.Pointer[Bucket])
+	}
+	shard.retired[key] = weak.Make(b)
+	b.retired.Store(true)
+	delete(shard.buckets, key)
+	shard.retirementsSinceSweep++
+	if shard.retirementsSinceSweep >= maxBucketsBeforePrune {
+		r.sweepRetiredLocked(shard)
+	}
+}
+
+// RemoveBucket evicts an idle bucket from the cache. Locked buckets and
+// buckets with an active rate-limit window are retained. Existing references
+// remain valid and will be reused by subsequent lookups until collected.
 func (r *RateLimiter) RemoveBucket(key string) {
 	shard := r.shardFor(key)
 	shard.Lock()
 	defer shard.Unlock()
-	delete(shard.buckets, key)
+	b := shard.buckets[key]
+	if b == nil || !b.TryLock() {
+		return
+	}
+	defer b.Unlock()
+	if b.reset.IsZero() || !b.reset.After(time.Now()) {
+		r.retireBucketLocked(shard, key, b)
+	}
 }
 
-// GetWaitTime returns the duration you should wait for a Bucket
+// GetWaitTime returns the longer of the bucket and global cooldowns.
+// The caller must hold b's lock.
 func (r *RateLimiter) GetWaitTime(b *Bucket, minRemaining int) time.Duration {
-	// If we ran out of calls and the reset time is still ahead of us
-	// then we need to take it easy and relax a little
-	if b.Remaining < minRemaining && b.reset.After(time.Now()) {
-		return time.Until(b.reset)
+	now := time.Now()
+	var wait time.Duration
+	if b.Remaining < minRemaining && b.reset.After(now) {
+		wait = b.reset.Sub(now)
 	}
-
-	// Check for global ratelimits
-	sleepTo := time.Unix(0, atomic.LoadInt64(r.global))
-	if now := time.Now(); now.Before(sleepTo) {
-		return sleepTo.Sub(now)
+	if globalWait := time.Unix(0, atomic.LoadInt64(r.global)).Sub(now); globalWait > wait {
+		wait = globalWait
 	}
-
-	return 0
+	return wait
 }
 
 // LockBucket Locks until a request can be made
@@ -158,7 +200,7 @@ func (r *RateLimiter) LockBucket(bucketID string) *Bucket {
 func (r *RateLimiter) LockBucketObject(b *Bucket) *Bucket {
 	b.Lock()
 
-	if wait := r.GetWaitTime(b, 1); wait > 0 {
+	for wait := r.GetWaitTime(b, 1); wait > 0; wait = r.GetWaitTime(b, 1) {
 		time.Sleep(wait)
 	}
 
@@ -198,7 +240,7 @@ func (r *RateLimiter) LockBucketObjectContext(ctx context.Context, b *Bucket) (*
 		return nil, err
 	}
 
-	if wait := r.GetWaitTime(b, 1); wait > 0 {
+	for wait := r.GetWaitTime(b, 1); wait > 0; wait = r.GetWaitTime(b, 1) {
 		if err := sleepCtx(ctx, wait); err != nil {
 			b.Unlock()
 			return nil, err
@@ -217,6 +259,8 @@ type Bucket struct {
 	limit     int //nolint:unused // populated from X-RateLimit-Limit in some deployments
 	reset     time.Time
 	global    *int64
+	shard     *rateLimitShard
+	retired   atomic.Bool
 
 	lastReset       time.Time
 	customRateLimit *customRateLimit
@@ -226,7 +270,28 @@ type Bucket struct {
 // Release unlocks the bucket and reads the headers to update the buckets ratelimit info
 // and locks up the whole thing in case if there's a global ratelimit.
 func (b *Bucket) Release(headers http.Header) error {
+	return b.release(headers, nil)
+}
+
+func (b *Bucket) release(headers http.Header, limited *TooManyRequests) error {
 	defer b.Unlock()
+	defer b.retainActiveWindow()
+	if limited != nil {
+		// Apply the 429 body last so optimistic headers cannot override it.
+		defer func() {
+			reset := time.Now().Add(limited.RetryAfter)
+			b.Remaining = 0
+			if reset.After(b.reset) {
+				b.reset = reset
+			}
+			if limited.Global {
+				extendGlobalLimit(b.global, reset.UnixNano())
+			}
+		}()
+	}
+
+	globalHeader := headers.Get("X-RateLimit-Global")
+	global := globalHeader == "1" || strings.EqualFold(globalHeader, "true")
 
 	// Check if the bucket uses a custom ratelimiter
 	if rl := b.customRateLimit; rl != nil {
@@ -237,7 +302,9 @@ func (b *Bucket) Release(headers http.Header) error {
 		if b.Remaining < 1 {
 			b.reset = time.Now().Add(rl.reset)
 		}
-		return nil
+		if !global {
+			return nil
+		}
 	}
 
 	if headers == nil {
@@ -246,26 +313,31 @@ func (b *Bucket) Release(headers http.Header) error {
 
 	remaining := headers.Get("X-RateLimit-Remaining")
 	reset := headers.Get("X-RateLimit-Reset")
-	global := headers.Get("X-RateLimit-Global")
 	resetAfter := headers.Get("X-RateLimit-Reset-After")
+	if retryAfter := headers.Get("Retry-After"); retryAfter != "" {
+		resetAfter = retryAfter
+	}
 
 	// Update global and per bucket reset time if the proper headers are available
 	// If global is set, then it will block all buckets until after Retry-After
 	// If Retry-After without global is provided it will use that for the new reset
 	// time since it's more accurate than X-RateLimit-Reset.
-	// If Retry-After after is not proided, it will update the reset time from X-RateLimit-Reset
+	// If Retry-After is not provided, it will update the reset time from X-RateLimit-Reset
 	if resetAfter != "" {
 		parsedAfter, err := strconv.ParseFloat(resetAfter, 64)
 		if err != nil {
 			return err
 		}
 
-		whole, frac := math.Modf(parsedAfter)
-		resetAt := time.Now().Add(time.Duration(whole) * time.Second).Add(time.Duration(frac*1000) * time.Millisecond)
+		delay, err := durationFromSeconds(parsedAfter)
+		if err != nil {
+			return err
+		}
+		resetAt := time.Now().Add(delay)
 
 		// Lock either this single bucket or all buckets
-		if global != "" {
-			atomic.StoreInt64(b.global, resetAt.UnixNano())
+		if global {
+			extendGlobalLimit(b.global, resetAt.UnixNano())
 		} else {
 			b.reset = resetAt
 		}
@@ -287,11 +359,16 @@ func (b *Bucket) Release(headers http.Header) error {
 		// in 1k requests
 		whole, frac := math.Modf(unix)
 		delta := time.Unix(int64(whole), 0).Add(time.Duration(frac*1000)*time.Millisecond).Sub(discordTime) + time.Millisecond*250
-		b.reset = time.Now().Add(delta)
+		resetAt := time.Now().Add(delta)
+		if global {
+			extendGlobalLimit(b.global, resetAt.UnixNano())
+		} else {
+			b.reset = resetAt
+		}
 	}
 
-	// Udpate remaining if header is present
-	if remaining != "" {
+	// Update remaining if header is present
+	if remaining != "" && b.customRateLimit == nil {
 		parsedRemaining, err := strconv.ParseInt(remaining, 10, 32)
 		if err != nil {
 			return err
@@ -300,6 +377,20 @@ func (b *Bucket) Release(headers http.Header) error {
 	}
 
 	return nil
+}
+
+// A caller can reuse a bucket directly after it was pruned. Keep it strongly
+// cached again if that request establishes a new cooldown, even after the
+// caller drops the last external reference.
+func (b *Bucket) retainActiveWindow() {
+	if b.shard == nil || !b.retired.Load() || !b.reset.After(time.Now()) {
+		return
+	}
+	b.shard.Lock()
+	defer b.shard.Unlock()
+	b.shard.buckets[b.Key] = b
+	delete(b.shard.retired, b.Key)
+	b.retired.Store(false)
 }
 
 // GetBucketIfPresent returns the bucket for the key if it exists, without
@@ -311,7 +402,8 @@ func (r *RateLimiter) GetBucketIfPresent(key string) *Bucket {
 	return shard.buckets[key]
 }
 
-// BucketCount returns the total number of live buckets across all shards.
+// BucketCount returns the number of strongly cached buckets across all shards.
+// Evicted weak references are not included.
 func (r *RateLimiter) BucketCount() int {
 	n := 0
 	for i := range r.shards {
@@ -320,4 +412,21 @@ func (r *RateLimiter) BucketCount() int {
 		r.shards[i].Unlock()
 	}
 	return n
+}
+
+// extendGlobalLimit never lets a later response shorten an existing cooldown.
+func extendGlobalLimit(global *int64, reset int64) {
+	for {
+		previous := atomic.LoadInt64(global)
+		if previous >= reset || atomic.CompareAndSwapInt64(global, previous, reset) {
+			return
+		}
+	}
+}
+
+func durationFromSeconds(seconds float64) (time.Duration, error) {
+	if math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds < 0 || seconds >= float64(math.MaxInt64)/float64(time.Second) {
+		return 0, fmt.Errorf("invalid rate-limit duration: %v seconds", seconds)
+	}
+	return time.Duration(math.Ceil(seconds * float64(time.Second))), nil
 }
