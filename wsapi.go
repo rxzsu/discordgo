@@ -976,11 +976,7 @@ type identifyOp struct {
 	Data Identify `json:"d"`
 }
 
-// identify sends the identify packet to the gateway
-func (s *Session) identify() error {
-	return s.identifyContext(context.Background())
-}
-
+// identifyContext sends the identify packet to the gateway.
 func (s *Session) identifyContext(ctx context.Context) error {
 	s.log(LogDebug, "called")
 

@@ -270,3 +270,34 @@ func TestShardManagerRejectsNegativeConfiguration(t *testing.T) {
 		}
 	}
 }
+
+func TestShardLookupDuringPartialStartup(t *testing.T) {
+	m := NewShardManager(ShardingConfig{ShardCount: 4})
+	m.Sessions = []*Session{{ShardID: 0, ShardCount: 4}, {ShardID: 1, ShardCount: 4}}
+	if got := m.ShardForGuildID("4194304"); got != m.Sessions[1] {
+		t.Fatal("guild assigned to connected shard 1 was routed incorrectly")
+	}
+	if got := m.ShardForGuildID("8388608"); got != nil {
+		t.Fatal("guild assigned to unopened shard 2 was routed to another shard")
+	}
+}
+
+func TestShardManagerDisconnectHandlerCanUseManager(t *testing.T) {
+	m := NewShardManager(ShardingConfig{})
+	s, _ := New("Bot test")
+	s.SyncEvents = true
+	s.DataReady = true
+	m.mu.Lock()
+	m.addSessionLocked(s)
+	m.mu.Unlock()
+	called := make(chan struct{})
+	m.AddHandler(func(*Session, *Disconnect) {
+		m.ShardForGuildID("1")
+		m.Close()
+		close(called)
+	})
+	done := make(chan error, 1)
+	go func() { m.Close(); done <- nil }()
+	waitStartupStage(t, called)
+	waitStartupResult(t, done)
+}

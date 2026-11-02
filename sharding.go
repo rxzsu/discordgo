@@ -54,6 +54,7 @@ type ShardManager struct {
 	Sessions []*Session
 
 	opening    bool
+	closing    int
 	openCancel context.CancelFunc
 	mu         sync.Mutex
 	handlers   []*shardHandlerEntry
@@ -166,7 +167,7 @@ func (m *ShardManager) Open() error {
 // After success ctx no longer controls the connected sessions.
 func (m *ShardManager) OpenContext(ctx context.Context) (err error) {
 	m.mu.Lock()
-	if m.opening || len(m.Sessions) > 0 {
+	if m.opening || m.closing > 0 || len(m.Sessions) > 0 {
 		m.mu.Unlock()
 		return ErrWSAlreadyOpen
 	}
@@ -184,15 +185,19 @@ func (m *ShardManager) OpenContext(ctx context.Context) (err error) {
 	m.mu.Unlock()
 	defer func() {
 		m.mu.Lock()
-		defer m.mu.Unlock()
 		if err == nil {
 			err = ctx.Err()
 		}
 		cancel()
+		var sessions []*Session
 		if err != nil {
-			m.closeLocked()
+			sessions = m.detachSessionsLocked()
 		}
+		m.mu.Unlock()
+		closeShardSessions(sessions)
+		m.mu.Lock()
 		m.opening, m.openCancel = false, nil
+		m.mu.Unlock()
 	}()
 
 	count, delay := config.ShardCount, config.IdentifyDelay
@@ -286,21 +291,24 @@ func identifyDelayForConcurrency(concurrency int) time.Duration {
 // through the session logger; Close always disconnects all shards.
 func (m *ShardManager) Close() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.openCancel != nil {
 		m.openCancel()
 	}
-	m.closeLocked()
+	m.closing++
+	sessions := m.detachSessionsLocked()
+	m.mu.Unlock()
+	// Session.Close emits Disconnect; callbacks may call manager methods.
+	closeShardSessions(sessions)
+	m.mu.Lock()
+	m.closing--
+	m.mu.Unlock()
 }
 
-func (m *ShardManager) closeLocked() {
-	for _, s := range m.Sessions {
-		if err := s.Close(); err != nil {
-			s.log(LogError, "error closing shard %d, %s", s.ShardID, err)
-		}
-		// Drop the closed session from every handler entry's remover
-		// map so closed Sessions are not pinned in memory for the
-		// manager's lifetime.
+// detachSessionsLocked removes references before any user callbacks run.
+func (m *ShardManager) detachSessionsLocked() []*Session {
+	sessions := m.Sessions
+	m.Sessions = nil
+	for _, s := range sessions {
 		for _, e := range m.handlers {
 			delete(e.removers, s)
 		}
@@ -308,16 +316,32 @@ func (m *ShardManager) closeLocked() {
 			delete(e.removers, s)
 		}
 	}
-	m.Sessions = nil
+	return sessions
+}
+
+func closeShardSessions(sessions []*Session) {
+	for _, s := range sessions {
+		if err := s.Close(); err != nil {
+			s.log(LogError, "error closing shard %d, %s", s.ShardID, err)
+		}
+	}
 }
 
 // ShardForGuildID returns the Session responsible for the given guild.
-// It returns nil before Open or when the manager has no sessions.
+// It returns nil before Open, after Close, or if that shard has not been
+// created yet during startup.
 func (m *ShardManager) ShardForGuildID(guildID string) *Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	shard, err := ShardIDForGuild(guildID, len(m.Sessions))
-	if err != nil {
+	if len(m.Sessions) == 0 {
+		return nil
+	}
+	count := m.Sessions[0].ShardCount
+	if count < 1 {
+		count = len(m.Sessions)
+	}
+	shard, err := ShardIDForGuild(guildID, count)
+	if err != nil || shard >= len(m.Sessions) {
 		return nil
 	}
 	return m.Sessions[shard]

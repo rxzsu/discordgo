@@ -4,7 +4,7 @@ All notable changes in this fork relative to upstream
 [bwmarrin/discordgo](https://github.com/bwmarrin/discordgo) are documented
 here.
 
-## Unreleased
+## v1.5.0
 
 ### Added
 - Optional `Session.RequestObserver` with one `RESTRequestMetrics` record
@@ -16,6 +16,9 @@ here.
   gateway discovery session before connecting.
 
 ### Fixed
+- Shard lookup uses the total shard count during partial startup and returns
+  nil for shards not connected yet.
+- Disconnect callbacks can call manager methods without deadlocking shutdown.
 - Rate-limit cache pruning preserves bucket identity while callers hold
   references; active cooldowns survive direct reuse and garbage collection.
   `RemoveBucket` now retains locked buckets and active windows.
@@ -38,6 +41,14 @@ here.
 
 ### Changed
 - Guild-to-shard lookups no longer allocate or copy the session slice.
+
+### Compatibility notes
+- Existing `Open()` methods remain available. Closing a manager during
+  startup now causes the pending open call to return `context.Canceled`.
+- Request options are applied once per operation rather than reapplied
+  for every automatic retry, preserving the original timeout deadline.
+- `RemoveBucket` is now safe cache eviction; it no longer forcibly resets
+  an active endpoint's rate limit.
 
 ## v1.4.1
 

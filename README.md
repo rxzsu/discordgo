@@ -167,8 +167,8 @@ The examples in [examples/](examples/) demonstrate the most common features.
 
 ## Roadmap to v1.0
 
-The fork is currently at **v1.0.0-rc.1**. Final v1.0.0 ships once the
-following are complete:
+The fork is currently at **v1.5.0**. The original v1.0 roadmap is retained
+below as historical context:
 
 - [x] Modern toolchain (Go 1.27) and maintained websocket dependency
 - [x] Context-aware REST core (rate limit waits and retries respect
