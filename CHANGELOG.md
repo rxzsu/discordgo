@@ -7,6 +7,9 @@ here.
 ## Unreleased
 
 ### Added
+- Optional `Session.RequestObserver` with one `RESTRequestMetrics` record
+  per completed REST operation: duration, latest HTTP status, attempts,
+  retries, rate-limit responses, and final error.
 - `Session.OpenContext` and `ShardManager.OpenContext` for cancellable
   gateway discovery, dialing, handshakes and shard startup delays.
 - `ShardingConfig.ConfigureSession` to configure each shard and the

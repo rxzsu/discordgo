@@ -98,6 +98,12 @@ type Session struct {
 	// The http client used for REST requests
 	Client *http.Client
 
+	// RequestObserver receives one completion record per REST request,
+	// including its bucket waits and retries. Set it before making requests.
+	// It runs synchronously after the bucket is released and may be called
+	// concurrently by different requests; it should return quickly.
+	RequestObserver func(RESTRequestMetrics) `json:"-"`
+
 	// The timeout used when dialing WebSocket connections (gateway and voice).
 	DialTimeout time.Duration
 

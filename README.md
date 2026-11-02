@@ -84,6 +84,28 @@ not materialize at these sizes. The `-tags goccy` / `-tags sonic` files
 created, or set `discordgo.Marshal`/`Unmarshal` manually **before**
 calling `discordgo.New()`.
 
+### Observing REST requests
+
+Set `RequestObserver` before making requests to collect metrics without
+adding a metrics backend dependency:
+
+```go
+s.RequestObserver = func(m discordgo.RESTRequestMetrics) {
+    log.Printf("REST method=%s status=%d duration=%s retries=%d rate_limits=%d failed=%t",
+        m.Method, m.StatusCode, m.Duration, m.Retries, m.RateLimits, m.Error != nil)
+}
+```
+
+The callback runs once per completed REST operation, after releasing its
+bucket, and includes bucket waits and automatic retries. It runs
+synchronously and may be called concurrently; keep it short and protect
+shared counters. The record describes the HTTP operation; high-level JSON
+encoding and decoding are outside its scope. It has no URL, headers, or
+payload fields.
+
+For sharded bots, install the callback through
+`ShardingConfig.ConfigureSession`.
+
 ### Event dispatch concurrency
 
 By default every gateway event handler runs in its own goroutine, which

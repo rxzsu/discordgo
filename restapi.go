@@ -112,7 +112,26 @@ type RequestConfig struct {
 
 	// cancel is run by RequestWithLockedBucket once the request has
 	// fully completed; set by WithTimeout to release its timer early.
-	cancel func()
+	cancel  func()
+	metrics *RESTRequestMetrics
+}
+
+// RESTRequestMetrics describes one completed RequestRaw or
+// RequestWithLockedBucket operation, including its automatic retries.
+// High-level JSON encoding/decoding outside these methods is not included.
+type RESTRequestMetrics struct {
+	Method string
+	// StatusCode is the most recent HTTP response status, or 0 if none arrived.
+	StatusCode int
+	// Attempts counts calls to the HTTP client; Retries excludes the first.
+	Attempts int
+	Retries  int
+	// RateLimits counts HTTP 429 responses, including ones not retried.
+	RateLimits int
+	// Duration includes request construction, bucket waits and all attempts.
+	Duration time.Duration
+	// Error is the final request error; a successful retry leaves it nil.
+	Error error
 }
 
 // newRequestConfig returns a new HTTP request configuration based on parameters in Session.
@@ -251,6 +270,17 @@ func (s *Session) RequestWithLockedBucket(method, urlStr, contentType string, b 
 }
 
 func (s *Session) requestWithBucket(method, urlStr, contentType string, b []byte, bucket *Bucket, locked bool, sequence int, options ...RequestOption) (response []byte, err error) {
+	var metrics *RESTRequestMetrics
+	if observe := s.RequestObserver; observe != nil {
+		started := time.Now()
+		metrics = &RESTRequestMetrics{Method: method}
+		defer func() {
+			metrics.Duration = time.Since(started)
+			metrics.Retries = max(0, metrics.Attempts-1)
+			metrics.Error = err
+			observe(*metrics)
+		}()
+	}
 	if s.Debug {
 		log.Printf("API REQUEST %8s :: %s\n", method, urlStr)
 		log.Printf("API REQUEST  PAYLOAD :: [%s]\n", string(b))
@@ -280,8 +310,12 @@ func (s *Session) requestWithBucket(method, urlStr, contentType string, b []byte
 	req.Header.Set("User-Agent", s.UserAgent)
 
 	cfg := newRequestConfig(s, req)
+	cfg.metrics = metrics
 	for _, opt := range options {
 		opt(cfg)
+	}
+	if metrics != nil {
+		metrics.Method = cfg.Request.Method
 	}
 	defer func() {
 		if cfg.cancel != nil {
@@ -314,7 +348,16 @@ func (s *Session) requestWithConfig(cfg *RequestConfig, bucket *Bucket, sequence
 		}
 	}
 
+	if cfg.metrics != nil {
+		cfg.metrics.Attempts++
+	}
 	resp, err := cfg.Client.Do(req)
+	if cfg.metrics != nil && resp != nil {
+		cfg.metrics.StatusCode = resp.StatusCode
+		if resp.StatusCode == http.StatusTooManyRequests {
+			cfg.metrics.RateLimits++
+		}
+	}
 	if err != nil {
 		_ = bucket.Release(nil)
 		return
