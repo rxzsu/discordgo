@@ -176,8 +176,8 @@ func WithContext(ctx context.Context) RequestOption {
 	}
 }
 
-// WithTimeout applies a timeout to the request; the request is aborted
-// with a context error if it has not completed within d.
+// WithTimeout applies a timeout to the entire request, including bucket
+// waits and retries; it aborts with a context error if not completed within d.
 func WithTimeout(d time.Duration) RequestOption {
 	return func(cfg *RequestConfig) {
 		ctx, cancel := context.WithTimeout(cfg.Request.Context(), d)
@@ -185,7 +185,13 @@ func WithTimeout(d time.Duration) RequestOption {
 		// The context must stay alive for the lifetime of the in-flight
 		// request, so cancel is deferred to the end of the request
 		// instead of being called here (which would leak the timer).
-		cfg.cancel = cancel
+		previousCancel := cfg.cancel
+		cfg.cancel = func() {
+			cancel()
+			if previousCancel != nil {
+				previousCancel()
+			}
+		}
 	}
 }
 
@@ -236,11 +242,15 @@ func (s *Session) RequestRaw(method, urlStr, contentType string, b []byte, bucke
 	if bucketID == "" {
 		bucketID = BucketIDFromURL(urlStr)
 	}
-	return s.RequestWithLockedBucket(method, urlStr, contentType, b, s.Ratelimiter.LockBucket(bucketID), sequence, options...)
+	return s.requestWithBucket(method, urlStr, contentType, b, s.Ratelimiter.GetBucket(bucketID), false, sequence, options...)
 }
 
 // RequestWithLockedBucket makes a request using a bucket that's already been locked
 func (s *Session) RequestWithLockedBucket(method, urlStr, contentType string, b []byte, bucket *Bucket, sequence int, options ...RequestOption) (response []byte, err error) {
+	return s.requestWithBucket(method, urlStr, contentType, b, bucket, true, sequence, options...)
+}
+
+func (s *Session) requestWithBucket(method, urlStr, contentType string, b []byte, bucket *Bucket, locked bool, sequence int, options ...RequestOption) (response []byte, err error) {
 	if s.Debug {
 		log.Printf("API REQUEST %8s :: %s\n", method, urlStr)
 		log.Printf("API REQUEST  PAYLOAD :: [%s]\n", string(b))
@@ -248,7 +258,9 @@ func (s *Session) RequestWithLockedBucket(method, urlStr, contentType string, b 
 
 	req, err := http.NewRequest(method, urlStr, bytes.NewBuffer(b))
 	if err != nil {
-		_ = bucket.Release(nil)
+		if locked {
+			_ = bucket.Release(nil)
+		}
 		return
 	}
 
@@ -276,8 +288,26 @@ func (s *Session) RequestWithLockedBucket(method, urlStr, contentType string, b 
 			cfg.cancel()
 		}
 	}()
-	req = cfg.Request
+	if !locked {
+		if _, err = s.Ratelimiter.LockBucketObjectContext(cfg.Request.Context(), bucket); err != nil {
+			return nil, err
+		}
+	}
+	return s.requestWithConfig(cfg, bucket, sequence)
+}
 
+// requestWithConfig reuses one configuration and deadline across all attempts.
+// The bucket must be locked on entry; every return path releases it.
+func (s *Session) requestWithConfig(cfg *RequestConfig, bucket *Bucket, sequence int) (response []byte, err error) {
+	req := cfg.Request.Clone(cfg.Request.Context())
+	if req.GetBody != nil {
+		req.Body, err = req.GetBody()
+		if err != nil {
+			_ = bucket.Release(nil)
+			return nil, err
+		}
+	}
+	urlStr := req.URL.String()
 	if s.Debug {
 		for k, v := range req.Header {
 			log.Printf("API REQUEST   HEADER :: [%s] = %+v\n", k, v)
@@ -334,7 +364,10 @@ func (s *Session) RequestWithLockedBucket(method, urlStr, contentType string, b 
 			}
 
 			s.log(LogInformational, "%s Failed (%s), Retrying...", urlStr, resp.Status)
-			response, err = s.RequestWithLockedBucket(method, urlStr, contentType, b, s.Ratelimiter.LockBucketObject(bucket), sequence+1, options...)
+			if _, err = s.Ratelimiter.LockBucketObjectContext(req.Context(), bucket); err != nil {
+				return nil, err
+			}
+			response, err = s.requestWithConfig(cfg, bucket, sequence+1)
 		} else {
 			err = fmt.Errorf("Exceeded Max retries HTTP %s, %s", resp.Status, response)
 		}
@@ -357,7 +390,10 @@ func (s *Session) RequestWithLockedBucket(method, urlStr, contentType string, b 
 				return
 			}
 
-			response, err = s.RequestWithLockedBucket(method, urlStr, contentType, b, s.Ratelimiter.LockBucketObject(bucket), sequence, options...)
+			if _, err = s.Ratelimiter.LockBucketObjectContext(req.Context(), bucket); err != nil {
+				return nil, err
+			}
+			response, err = s.requestWithConfig(cfg, bucket, sequence)
 		} else {
 			err = &RateLimitError{&RateLimit{TooManyRequests: &rl, URL: urlStr}}
 		}

@@ -9,7 +9,7 @@
 package discordgo
 
 import (
-	"math"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -262,12 +262,11 @@ func (m *ShardManager) closeLocked() {
 func (m *ShardManager) ShardForGuildID(guildID string) *Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	sessions := m.sessionsLocked()
-	shard, err := ShardIDForGuild(guildID, len(sessions))
+	shard, err := ShardIDForGuild(guildID, len(m.Sessions))
 	if err != nil {
 		return nil
 	}
-	return sessions[shard]
+	return m.Sessions[shard]
 }
 
 // ShardIDForGuild calculates the shard ID a guild is assigned to for the
@@ -285,18 +284,13 @@ func ShardIDForGuild(guildID string, shardCount int) (int, error) {
 
 // ParseSnowflakeInt64 parses a Discord snowflake ID into a uint64.
 func ParseSnowflakeInt64(id string) (uint64, error) {
-	var n uint64
-	if id == "" {
+	// Reject signs as well as out-of-range decimal values.
+	if id == "" || id[0] < '0' || id[0] > '9' {
 		return 0, ErrJSONUnmarshal
 	}
-	for _, c := range id {
-		if c < '0' || c > '9' {
-			return 0, ErrJSONUnmarshal
-		}
-		if n > math.MaxUint64/10 {
-			return 0, ErrJSONUnmarshal
-		}
-		n = n*10 + uint64(c-'0')
+	n, err := strconv.ParseUint(id, 10, 64)
+	if err != nil {
+		return 0, ErrJSONUnmarshal
 	}
 	return n, nil
 }

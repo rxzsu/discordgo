@@ -196,13 +196,14 @@ func (s *Session) startDispatchWorkers() {
 	defer s.handlersMu.Unlock()
 	s.dispatchJobs = make(chan func(), dispatchQueueSize)
 	s.dispatchStop = make(chan struct{})
+	jobs, stop := s.dispatchJobs, s.dispatchStop
 	for i := 0; i < s.DispatchWorkers; i++ {
 		go func() {
 			for {
 				select {
-				case <-s.dispatchStop:
+				case <-stop:
 					return
-				case f := <-s.dispatchJobs:
+				case f := <-jobs:
 					f()
 				}
 			}

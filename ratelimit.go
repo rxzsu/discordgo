@@ -175,7 +175,28 @@ func (r *RateLimiter) LockBucketContext(ctx context.Context, bucketID string) (*
 
 // LockBucketObjectContext is LockBucketObject with context-aware waiting.
 func (r *RateLimiter) LockBucketObjectContext(ctx context.Context, b *Bucket) (*Bucket, error) {
-	b.Lock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// Bucket embeds a public mutex, so retain compatibility with callers
+	// using Lock directly without spawning a goroutine that can outlive ctx.
+	if ctx.Done() == nil {
+		b.Lock()
+	} else if !b.TryLock() {
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for !b.TryLock() {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-ticker.C:
+			}
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		b.Unlock()
+		return nil, err
+	}
 
 	if wait := r.GetWaitTime(b, 1); wait > 0 {
 		if err := sleepCtx(ctx, wait); err != nil {
