@@ -4,6 +4,56 @@ All notable changes in this fork relative to upstream
 [bwmarrin/discordgo](https://github.com/bwmarrin/discordgo) are documented
 here.
 
+## v1.6.0
+
+### Fixed (voice)
+- Seven data races / nil panics in the voice connection, the same
+  snapshot-under-lock bug class fixed in v1.4.x, now closed out for
+  voice: `ChangeChannel` wrote `ChannelID`/`deaf`/`mute`/`speaking`
+  without the voice lock; `ChangeChannel`/`Disconnect`/`reconnect`
+  wrote directly to the session gateway without the session lock or a
+  nil check (nil panic whenever the gateway was closed or reconnecting
+  — a `writeSessionGateway` helper now snapshots under the session
+  read lock, mirroring `requestGuildMembers`); `opusReceiver` read
+  `v.aead` unlocked (the mirror of the `opusSender` fix from v1.4.0);
+  `reconnect` read session and voice state without locks, with a safe
+  documented lock order (`v.Lock` → `session.RLock`); `open`/`wsListen`
+  (op 4014) published and cleared `wsConn` without `wsMutex`; and the
+  OP2 handler started heartbeat/opus goroutines from unlocked reads.
+  Four regression tests in `voice_audit_test.go` reproduce data races
+  and a nil panic against the pre-fix code and pass cleanly after.
+
+### Changed (performance)
+- REST request path: the `http.Request` clone is no longer made on the
+  first attempt (the most common case) but only on retries — a 429
+  retry kept an unchanged sequence and silently dropped the body,
+  now covered by `Test429RetryPreservesBody`; `req.URL.String()` is
+  computed lazily off the hot path; response bodies are read into a
+  single buffer sized by `Content-Length` (capped at 16 MiB) instead
+  of repeatedly growing from 512 bytes. Measured with benchstat
+  (n=5): plain request path −32% time / −30% bytes / 30→20 allocs,
+  requests with a body −51% time / −47% bytes.
+- Rate-limit header reads are allocation-free: Discord sends
+  `X-RateLimit-*` headers in mixed case, so each `Header.Get` paid a
+  canonicalization allocation; precomputed canonical keys remove all
+  four per-response allocations (−34% time on the bucket-release path,
+  96→0 B/op). The v1.5.0 bucket identity / shared 429 cooldown
+  semantics are untouched.
+
+### Added
+- Guild Incident Actions API (raid panic mode):
+  `GuildIncidentActionsEdit` sets or lifts temporary invite and
+  direct-message restrictions, `GuildWithIncidentsData` fetches a guild
+  with its current `IncidentsData`, and the `IncidentsData` /
+  `GuildIncidentActionsParams` types (zero-time fields are sent as
+  explicit `null`s to clear a restriction).
+- `GuildAuditLogsComplex` with the full audit log filter set: the existing
+  `GuildAuditLog` signature is unchanged and additionally supports the
+  `after` and `application_id` filters via `GuildAuditLogFilter`.
+- Guild Member Verification API: `GuildMemberVerification` and
+  `GuildMemberVerificationEdit` read and update the member verification
+  form of a community guild.
+
 ## v1.5.0
 
 ### Added

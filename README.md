@@ -43,6 +43,14 @@ differences from upstream.
 - **`GuildBulkBan`**: ban up to 200 users in a single API call.
 - **Stickers, guild widget, soundboard**: full REST coverage of APIs
   that upstream defined endpoints for but never implemented methods for.
+- **Guild Incident Actions (raid panic mode)**: `GuildIncidentActionsEdit`
+  and `GuildWithIncidentsData` — temporarily disable invites/DMs during a
+  raid and read the current `IncidentsData`.
+- **Extended audit log filters**: `GuildAuditLogsComplex` supports the full
+  query set, including `after` and `application_id`.
+- **Guild Member Verification API**: `GuildMemberVerification` and
+  `GuildMemberVerificationEdit` read and update a community guild's
+  verification form.
 
 ### Breaking changes vs upstream
 
@@ -167,7 +175,7 @@ The examples in [examples/](examples/) demonstrate the most common features.
 
 ## Roadmap to v1.0
 
-The fork is currently at **v1.5.0**. The original v1.0 roadmap is retained
+The fork is currently at **v1.6.0**. The original v1.0 roadmap is retained
 below as historical context:
 
 - [x] Modern toolchain (Go 1.27) and maintained websocket dependency

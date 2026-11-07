@@ -251,6 +251,28 @@ func (r *RateLimiter) LockBucketObjectContext(ctx context.Context, b *Bucket) (*
 	return b, nil
 }
 
+// Canonical spellings of the rate-limit header names. Discord sends them in
+// mixed case ("X-RateLimit-Remaining"), which is NOT the canonical MIME form,
+// so headers.Get would re-canonicalize the key — an allocation — on every
+// call of the hot Release path. Indexing the map directly with the
+// precomputed canonical keys is equivalent (http.Header.Get is exactly
+// headers[CanonicalMIMEHeaderKey(key)]) but allocation-free.
+var (
+	canonRateLimitGlobal     = http.CanonicalHeaderKey("X-RateLimit-Global")
+	canonRateLimitRemaining  = http.CanonicalHeaderKey("X-RateLimit-Remaining")
+	canonRateLimitReset      = http.CanonicalHeaderKey("X-RateLimit-Reset")
+	canonRateLimitResetAfter = http.CanonicalHeaderKey("X-RateLimit-Reset-After")
+)
+
+// headerValue is equivalent to headers.Get(key) for an already canonical
+// key: it avoids re-canonicalizing (and allocating) on every call.
+func headerValue(headers http.Header, canonicalKey string) string {
+	if v := headers[canonicalKey]; len(v) > 0 {
+		return v[0]
+	}
+	return ""
+}
+
 // Bucket represents a ratelimit bucket, each bucket gets ratelimited individually (-global ratelimits)
 type Bucket struct {
 	sync.Mutex
@@ -290,7 +312,7 @@ func (b *Bucket) release(headers http.Header, limited *TooManyRequests) error {
 		}()
 	}
 
-	globalHeader := headers.Get("X-RateLimit-Global")
+	globalHeader := headerValue(headers, canonRateLimitGlobal)
 	global := globalHeader == "1" || strings.EqualFold(globalHeader, "true")
 
 	// Check if the bucket uses a custom ratelimiter
@@ -311,9 +333,9 @@ func (b *Bucket) release(headers http.Header, limited *TooManyRequests) error {
 		return nil
 	}
 
-	remaining := headers.Get("X-RateLimit-Remaining")
-	reset := headers.Get("X-RateLimit-Reset")
-	resetAfter := headers.Get("X-RateLimit-Reset-After")
+	remaining := headerValue(headers, canonRateLimitRemaining)
+	reset := headerValue(headers, canonRateLimitReset)
+	resetAfter := headerValue(headers, canonRateLimitResetAfter)
 	if retryAfter := headers.Get("Retry-After"); retryAfter != "" {
 		resetAfter = retryAfter
 	}

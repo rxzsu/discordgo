@@ -3,6 +3,7 @@ package discordgo
 import (
 	"bytes"
 	"compress/zlib"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -38,6 +39,37 @@ func BenchmarkRequestPathNoOpts(b *testing.B) {
 			Header:     http.Header{},
 			Body:       http.NoBody,
 			Request:    r,
+		}, nil
+	})}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := s.RequestWithBucketID("GET", "https://discord.com/api/v9/users/123", nil, "")
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkRequestPathWithBody(b *testing.B) {
+	// A GET request whose stubbed response carries rate-limit headers and an
+	// ~8 KiB JSON body with a matching Content-Length — the realistic shape
+	// of a Discord REST response (header parsing plus body download).
+	body := []byte(`{"content":"` + strings.Repeat("x", 8192) + `"}`)
+	s, _ := New("Bot benchmark-token")
+	s.Client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		h := http.Header{}
+		h.Set("X-RateLimit-Remaining", "5")
+		h.Set("X-RateLimit-Reset", "1700000000.000")
+		h.Set("Date", "Mon, 02 Jan 2006 15:04:05 GMT")
+		return &http.Response{
+			StatusCode:    http.StatusOK,
+			Status:        "200 OK",
+			Header:        h,
+			Body:          io.NopCloser(bytes.NewReader(body)),
+			ContentLength: int64(len(body)),
+			Request:       r,
 		}, nil
 	})}
 

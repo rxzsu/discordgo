@@ -327,21 +327,25 @@ func (s *Session) requestWithBucket(method, urlStr, contentType string, b []byte
 			return nil, err
 		}
 	}
-	return s.requestWithConfig(cfg, bucket, sequence)
+	return s.requestWithConfig(cfg, bucket, sequence, false)
 }
 
 // requestWithConfig reuses one configuration and deadline across all attempts.
 // The bucket must be locked on entry; every return path releases it.
-func (s *Session) requestWithConfig(cfg *RequestConfig, bucket *Bucket, sequence int) (response []byte, err error) {
-	req := cfg.Request.Clone(cfg.Request.Context())
-	if req.GetBody != nil {
-		req.Body, err = req.GetBody()
-		if err != nil {
-			_ = bucket.Release(nil)
-			return nil, err
+// retry marks attempts made after a consumed first attempt: every retry runs
+// against a fresh deep copy of the original request so its body is restored.
+func (s *Session) requestWithConfig(cfg *RequestConfig, bucket *Bucket, sequence int, retry bool) (response []byte, err error) {
+	req := cfg.Request
+	if retry {
+		req = cfg.Request.Clone(cfg.Request.Context())
+		if req.GetBody != nil {
+			req.Body, err = req.GetBody()
+			if err != nil {
+				_ = bucket.Release(nil)
+				return nil, err
+			}
 		}
 	}
-	urlStr := req.URL.String()
 	if s.Debug {
 		for k, v := range req.Header {
 			log.Printf("API REQUEST   HEADER :: [%s] = %+v\n", k, v)
@@ -372,7 +376,7 @@ func (s *Session) requestWithConfig(cfg *RequestConfig, bucket *Bucket, sequence
 	var limited *TooManyRequests
 	if resp.StatusCode == http.StatusTooManyRequests {
 		// Keep the bucket locked until the 429 body updates shared limits.
-		response, err = io.ReadAll(resp.Body)
+		response, err = readBody(resp)
 		if err == nil {
 			var decoded TooManyRequests
 			if err = Unmarshal(response, &decoded); err == nil {
@@ -391,7 +395,7 @@ func (s *Session) requestWithConfig(cfg *RequestConfig, bucket *Bucket, sequence
 		if err = bucket.Release(resp.Header); err != nil {
 			return nil, err
 		}
-		response, err = io.ReadAll(resp.Body)
+		response, err = readBody(resp)
 		if err != nil {
 			return nil, err
 		}
@@ -424,11 +428,11 @@ func (s *Session) requestWithConfig(cfg *RequestConfig, bucket *Bucket, sequence
 				return
 			}
 
-			s.log(LogInformational, "%s Failed (%s), Retrying...", urlStr, resp.Status)
+			s.log(LogInformational, "%s Failed (%s), Retrying...", req.URL.String(), resp.Status)
 			if _, err = s.Ratelimiter.LockBucketObjectContext(req.Context(), bucket); err != nil {
 				return nil, err
 			}
-			response, err = s.requestWithConfig(cfg, bucket, sequence+1)
+			response, err = s.requestWithConfig(cfg, bucket, sequence+1, true)
 		} else {
 			err = fmt.Errorf("Exceeded Max retries HTTP %s, %s", resp.Status, response)
 		}
@@ -436,16 +440,16 @@ func (s *Session) requestWithConfig(cfg *RequestConfig, bucket *Bucket, sequence
 		rl := limited
 
 		if cfg.ShouldRetryOnRateLimit {
-			s.log(LogInformational, "Rate Limiting %s, retry in %v", urlStr, rl.RetryAfter)
-			s.handleEvent(rateLimitEventType, &RateLimit{TooManyRequests: rl, URL: urlStr})
+			s.log(LogInformational, "Rate Limiting %s, retry in %v", req.URL.String(), rl.RetryAfter)
+			s.handleEvent(rateLimitEventType, &RateLimit{TooManyRequests: rl, URL: req.URL.String()})
 
 			// The shared bucket/global state now supplies the retry delay.
 			if _, err = s.Ratelimiter.LockBucketObjectContext(req.Context(), bucket); err != nil {
 				return nil, err
 			}
-			response, err = s.requestWithConfig(cfg, bucket, sequence)
+			response, err = s.requestWithConfig(cfg, bucket, sequence, true)
 		} else {
-			err = &RateLimitError{&RateLimit{TooManyRequests: rl, URL: urlStr}}
+			err = &RateLimitError{&RateLimit{TooManyRequests: rl, URL: req.URL.String()}}
 		}
 	case http.StatusUnauthorized:
 		if !strings.HasPrefix(s.Token, "Bot ") {
@@ -467,6 +471,42 @@ func BucketIDFromURL(urlStr string) string {
 		return urlStr[:i]
 	}
 	return urlStr
+}
+
+// maxBodyPrealloc bounds the output buffer preallocated from a response's
+// Content-Length, so a broken or hostile server cannot make the client
+// allocate unbounded memory for a single response.
+const maxBodyPrealloc = 1 << 24 // 16 MiB
+
+// readBody reads the whole response body. When the response declares a
+// Content-Length within a sane bound, the output buffer is allocated once at
+// exactly that size instead of io.ReadAll's grow-from-512-bytes doubling,
+// which reallocates and copies a multi-kilobyte Discord payload several times.
+func readBody(resp *http.Response) ([]byte, error) {
+	if resp.ContentLength <= 0 || resp.ContentLength > maxBodyPrealloc {
+		return io.ReadAll(resp.Body)
+	}
+	// One byte of headroom detects a lying Content-Length inside the loop.
+	buf := make([]byte, 0, resp.ContentLength+1)
+	for len(buf) < cap(buf) {
+		n, err := resp.Body.Read(buf[len(buf):cap(buf)])
+		buf = buf[:len(buf)+n]
+		if err != nil {
+			if err == io.EOF {
+				err = nil
+			}
+			return buf, err
+		}
+	}
+	// Declared length was filled exactly; drain any excess defensively.
+	rest, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if len(rest) == 0 {
+		return buf, nil
+	}
+	return append(buf, rest...), nil
 }
 
 func unmarshal(data []byte, v interface{}) error {

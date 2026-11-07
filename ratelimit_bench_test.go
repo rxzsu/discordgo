@@ -1,8 +1,10 @@
 package discordgo
 
 import (
+	"net/http"
 	"strconv"
 	"testing"
+	"time"
 )
 
 func BenchmarkLimiterLockParallel(b *testing.B) {
@@ -39,5 +41,23 @@ func BenchmarkLimiterChurn(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		bucket := r.LockBucket(keys[i%len(keys)])
 		_ = bucket.Release(nil)
+	}
+}
+
+// BenchmarkBucketReleaseHeaders isolates the Bucket.Release hot path with a
+// realistic set of Discord rate-limit response headers.
+func BenchmarkBucketReleaseHeaders(b *testing.B) {
+	r := NewRatelimiter()
+	key := "/channels/1/messages"
+	headers := http.Header{}
+	headers.Set("X-RateLimit-Remaining", "10")
+	headers.Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Unix(), 10)+".000")
+	headers.Set("Date", time.Now().UTC().Format(http.TimeFormat))
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		bucket := r.LockBucket(key)
+		_ = bucket.Release(headers)
 	}
 }
