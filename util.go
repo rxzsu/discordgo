@@ -50,6 +50,13 @@ func MultipartBodyWithJSON(data interface{}, files []*File) (requestContentType 
 	}
 
 	for i, file := range files {
+		// Guard against nil files/readers: dereferencing them here would
+		// panic the caller (e.g. GuildStickerCreate with a nil file).
+		if file == nil || file.Reader == nil {
+			err = fmt.Errorf("multipart file %d is nil or has no Reader", i)
+			return
+		}
+
 		h := make(textproto.MIMEHeader)
 		h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="files[%d]"; filename="%s"`, i, quoteEscaper.Replace(file.Name)))
 		contentType := file.ContentType

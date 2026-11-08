@@ -58,9 +58,13 @@ type State struct {
 	// messageRemoveByID into O(1) lookups on the hottest state path.
 	messageIndex map[string]map[string]*Message
 	// presenceIndex maps guildID -> userID -> *Presence and mirrors
-	// Guild.Presences; presence updates are the highest-volume event
-	// type on large guilds.
+	// Guild.Presences; presence updates are the highest-volume event type
+	// on large guilds.
 	presenceIndex map[string]map[string]*Presence
+	// voiceStateIndex maps guildID -> userID -> *VoiceState and mirrors
+	// Guild.VoiceStates; VoiceState() was an O(n) scan per lookup and is
+	// called by every VoiceStateUpdate event on voice-heavy guilds.
+	voiceStateIndex map[string]map[string]*VoiceState
 }
 
 // NewState creates an empty state.
@@ -87,6 +91,7 @@ func NewState() *State {
 		memberMap:       make(map[string]map[string]*Member),
 		messageIndex:    make(map[string]map[string]*Message),
 		presenceIndex:   make(map[string]map[string]*Presence),
+		voiceStateIndex: make(map[string]map[string]*VoiceState),
 	}
 }
 
@@ -96,6 +101,22 @@ func (s *State) createMemberMap(guild *Guild) {
 		members[m.User.ID] = m
 	}
 	s.memberMap[guild.ID] = members
+}
+
+// indexVoiceStates rebuilds the per-guild voice-state index from the guild's
+// current VoiceStates. Called with the state write lock held.
+func (s *State) indexVoiceStates(guildID string, states []*VoiceState) {
+	if len(states) == 0 {
+		return
+	}
+	vidx := s.voiceStateIndex[guildID]
+	if vidx == nil {
+		vidx = make(map[string]*VoiceState, len(states))
+		s.voiceStateIndex[guildID] = vidx
+	}
+	for _, vs := range states {
+		vidx[vs.UserID] = vs
+	}
 }
 
 // GuildAdd adds a guild to the current world state, or
@@ -154,11 +175,15 @@ func (s *State) GuildAdd(guild *Guild) error {
 			guild.VoiceStates = g.VoiceStates
 		}
 		*g = *guild
+		// VoiceStates may have been replaced wholesale; the index must
+		// follow the new slice.
+		s.indexVoiceStates(guild.ID, guild.VoiceStates)
 		return nil
 	}
 
 	s.Guilds = append(s.Guilds, guild)
 	s.guildMap[guild.ID] = guild
+	s.indexVoiceStates(guild.ID, guild.VoiceStates)
 
 	// Index presences carried by GUILD_CREATE, mirroring onReady.
 	if len(guild.Presences) > 0 {
@@ -203,6 +228,7 @@ func (s *State) GuildRemove(guild *Guild) error {
 	}
 	delete(s.memberMap, guild.ID)
 	delete(s.presenceIndex, guild.ID)
+	delete(s.voiceStateIndex, guild.ID)
 	delete(s.guildMap, guild.ID)
 
 	for i, gi := range s.Guilds {
@@ -848,13 +874,16 @@ func (s *State) MessageAdd(message *Message) error {
 		return ErrNilState
 	}
 
-	c, err := s.Channel(message.ChannelID)
-	if err != nil {
-		return err
-	}
-
 	s.Lock()
 	defer s.Unlock()
+
+	// Channel lookup under the write lock: the old code took a read lock
+	// via Channel() first and then re-acquired the write lock, two lock
+	// round-trips per message event.
+	c, ok := s.channelMap[message.ChannelID]
+	if !ok {
+		return ErrStateNotFound
+	}
 
 	// If the message exists, merge in the new message contents.
 	// The index makes this an O(1) lookup instead of a full scan.
@@ -917,13 +946,15 @@ func (s *State) MessageRemove(message *Message) error {
 
 // messageRemoveByID removes a message by channelID and messageID from the world state.
 func (s *State) messageRemoveByID(channelID, messageID string) error {
-	c, err := s.Channel(channelID)
-	if err != nil {
-		return err
-	}
-
 	s.Lock()
 	defer s.Unlock()
+
+	// Channel lookup under the write lock (see MessageAdd): one lock
+	// round-trip instead of a read lock followed by a write lock.
+	c, ok := s.channelMap[channelID]
+	if !ok {
+		return ErrStateNotFound
+	}
 
 	if idx := s.messageIndex[channelID]; idx != nil {
 		if _, ok := idx[messageID]; !ok {
@@ -954,19 +985,26 @@ func (s *State) messageRemoveByID(channelID, messageID string) error {
 }
 
 func (s *State) voiceStateUpdate(update *VoiceStateUpdate) error {
-	guild, err := s.Guild(update.GuildID)
-	if err != nil {
-		return err
-	}
-
+	// Everything runs under one write lock: the old code took a read lock
+	// via Guild() first and then re-acquired the write lock.
 	s.Lock()
 	defer s.Unlock()
+
+	guild, ok := s.guildMap[update.GuildID]
+	if !ok {
+		return ErrStateNotFound
+	}
+
+	vidx := s.voiceStateIndex[update.GuildID]
 
 	// Handle Leaving Channel
 	if update.ChannelID == "" {
 		for i, state := range guild.VoiceStates {
 			if state.UserID == update.UserID {
 				guild.VoiceStates = append(guild.VoiceStates[:i], guild.VoiceStates[i+1:]...)
+				if vidx != nil {
+					delete(vidx, update.UserID)
+				}
 				return nil
 			}
 		}
@@ -974,11 +1012,19 @@ func (s *State) voiceStateUpdate(update *VoiceStateUpdate) error {
 		for i, state := range guild.VoiceStates {
 			if state.UserID == update.UserID {
 				guild.VoiceStates[i] = update.VoiceState
+				if vidx != nil {
+					vidx[update.UserID] = update.VoiceState
+				}
 				return nil
 			}
 		}
 
 		guild.VoiceStates = append(guild.VoiceStates, update.VoiceState)
+		if vidx == nil {
+			vidx = make(map[string]*VoiceState)
+			s.voiceStateIndex[update.GuildID] = vidx
+		}
+		vidx[update.UserID] = update.VoiceState
 	}
 
 	return nil
@@ -990,14 +1036,29 @@ func (s *State) VoiceState(guildID, userID string) (*VoiceState, error) {
 		return nil, ErrNilState
 	}
 
-	guild, err := s.Guild(guildID)
-	if err != nil {
-		return nil, err
+	// One read lock covers both the guild check and the index/scan: the
+	// scan over guild.VoiceStates used to run without any lock at all,
+	// racing with voiceStateUpdate on concurrent events.
+	s.RLock()
+	defer s.RUnlock()
+
+	if _, ok := s.guildMap[guildID]; !ok {
+		return nil, ErrStateNotFound
 	}
 
-	for _, state := range guild.VoiceStates {
-		if state.UserID == userID {
-			return state, nil
+	if vidx := s.voiceStateIndex[guildID]; vidx != nil {
+		if vs, ok := vidx[userID]; ok {
+			return vs, nil
+		}
+		return nil, ErrStateNotFound
+	}
+
+	// No index for this guild (state predates the index): scan.
+	if guild, ok := s.guildMap[guildID]; ok {
+		for _, state := range guild.VoiceStates {
+			if state.UserID == userID {
+				return state, nil
+			}
 		}
 	}
 
@@ -1010,13 +1071,15 @@ func (s *State) Message(channelID, messageID string) (*Message, error) {
 		return nil, ErrNilState
 	}
 
-	c, err := s.Channel(channelID)
-	if err != nil {
-		return nil, err
-	}
-
+	// One read lock covers channel and message lookup (the old code took
+	// the read lock twice: once via Channel(), once for the index/scan).
 	s.RLock()
 	defer s.RUnlock()
+
+	c, ok := s.channelMap[channelID]
+	if !ok {
+		return nil, ErrStateNotFound
+	}
 
 	if idx := s.messageIndex[channelID]; idx != nil {
 		if m, ok := idx[messageID]; ok {
@@ -1069,10 +1132,12 @@ func (s *State) onReady(se *Session, r *Ready) (err error) {
 	s.memberMap = make(map[string]map[string]*Member, len(s.Guilds))
 	s.messageIndex = make(map[string]map[string]*Message)
 	s.presenceIndex = make(map[string]map[string]*Presence)
+	s.voiceStateIndex = make(map[string]map[string]*VoiceState)
 
 	for _, g := range s.Guilds {
 		s.guildMap[g.ID] = g
 		s.createMemberMap(g)
+		s.indexVoiceStates(g.ID, g.VoiceStates)
 
 		// READY carries presences: index them, otherwise presenceAdd
 		// would append duplicates instead of updating in place, and

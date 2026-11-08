@@ -1,7 +1,9 @@
 package discordgo
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -543,5 +545,159 @@ func TestOnReadyResetsIndexes(t *testing.T) {
 	}
 	if _, err := st.Guild("new"); err != nil {
 		t.Fatalf("new guild must be indexed: %v", err)
+	}
+}
+
+func TestParseGatewayEnvelope(t *testing.T) {
+	// Payloads the gateway actually sends: the fast scan must agree with the
+	// general JSON decoder on every field, or reject the payload entirely.
+	cases := []string{
+		`{"t":null,"s":11,"op":11,"d":{}}`,
+		`{"t":"MESSAGE_CREATE","s":1,"op":0,"d":{"id":"1","content":"hi"}}`,
+		`{"op":10,"d":{"heartbeat_interval":41250}}`,
+		`{"op":1}`,
+		`{"s":42,"t":"READY","op":0,"d":{"user":{"id":"9"}},"session_id":"abc"}`,
+		`{}`,
+		` {"t" : "GUILD_CREATE" , "s" : 7 , "op" : 0 , "d" : { "id" : "g" } } `,
+		`{"t":"X","s":1,"op":0,"d":null}`,
+		`{"unknown":{"nested":{"deep":[1,2,{"a":"}"}]}},"t":"Y","s":2,"op":0,"d":[]}`,
+		`{"t":"X","s":1,"op":0,"d":{"big":"` + strings.Repeat("x", 8192) + `"}}`,
+	}
+	for _, tc := range cases {
+		var want *Event
+		if err := Unmarshal([]byte(tc), &want); err != nil {
+			t.Fatalf("reference decode failed for %q: %v", tc, err)
+		}
+		ge, ok := parseGatewayEnvelope([]byte(tc))
+		if !ok {
+			t.Fatalf("fast scan rejected valid payload %q", tc)
+		}
+		if ge.op != want.Operation || ge.seq != want.Sequence || ge.typ != want.Type {
+			t.Fatalf("mismatch for %q: got op=%d seq=%d typ=%q, want op=%d seq=%d typ=%q",
+				tc, ge.op, ge.seq, ge.typ, want.Operation, want.Sequence, want.Type)
+		}
+		if len(ge.data) != len(want.RawData) {
+			t.Fatalf("data length mismatch for %q: got %d, want %d", tc, len(ge.data), len(want.RawData))
+		}
+		// RawData bytes must be identical (encoding may differ only in
+		// whitespace the decoder preserved, so compare post-decode).
+		var gotStruct, wantStruct map[string]interface{}
+		if len(ge.data) > 0 {
+			if err := json.Unmarshal(ge.data, &gotStruct); err != nil && string(ge.data) != "null" && string(ge.data) != "[]" {
+				t.Fatalf("fast-scan data not decodable for %q: %v", tc, err)
+			}
+		}
+		if len(want.RawData) > 0 {
+			if err := json.Unmarshal(want.RawData, &wantStruct); err != nil && string(want.RawData) != "null" && string(want.RawData) != "[]" {
+				t.Fatalf("reference data not decodable for %q: %v", tc, err)
+			}
+		}
+		gj, _ := json.Marshal(gotStruct)
+		wj, _ := json.Marshal(wantStruct)
+		if string(gj) != string(wj) {
+			t.Fatalf("data content mismatch for %q: got %s, want %s", tc, gj, wj)
+		}
+	}
+
+	// Invalid payloads must be rejected so the general decoder reports them.
+	// Also: an escaped event name is legal JSON the gateway never sends; the
+	// fast scan declines it and onEvent falls back to the general decoder.
+	bad := []string{
+		`{"t":"esc\taped","s":1,"op":0,"d":{}}`,
+		``,
+		`not json`,
+		`[]`,
+		`{"t":"X","s":1,"op":0,"d":{}} extra`,
+		`{"t":"X","s":1,"op":0,"d":{`,
+		`{"t":"X","s":1,"op":0,"d":{"a":tru}}`,
+		`{"t":"X","s":1,"op":0,"d":{"a":01}}`,
+		`{"t":"X","s":1,"op":0,"d":{"a":1e}}`,
+		`{"t":"X","s":1,"op":0,"d":"unclosed`,
+		`{"t":"X","s":1,"op":0,"d":{"a":"ctrl\x01"}}`,
+		`{"t":"X","s":1,"op":0`,
+		`{"t":"X","s":1,"op":0,"d":{}}{"x":1}`,
+		`{"t":"X","s":1,"op":0,"d":{"a":"b"x}}`,
+		`{"t":"X","s":1,"op":0,"d":[1,tru]}`,
+		`{"t":"X","s":1,"op":0,"d":{"a":1,"b":}}`,
+		`{"t":"X","s":1,"op":0,"d":[,]}`,
+		`{"t":"X","s":1,"op":0,"d":{"a" 1}}`,
+		`{"t":"X","s":1,"op":0,"d":[1,2,]}`,
+		`{"t":"X","s":1,"op":0,"d":{"a":{"b":[1,{"c":"}"}]},"z":tru}}`,
+		`{"t":"X","s":1,"op":0,"d":truex}`,
+		`{"t":"X","s":1,"op":0,"d":nullx}`,
+		`{"t":"X","s":1,"op":0,"d":[1 2]}`,
+		`{"t":"X","s":1,"op":0,"d":+.5}`,
+		`{"t":"X","s":1,"op":0,"d":{}x}`,
+	}
+	for _, tc := range bad {
+		if _, ok := parseGatewayEnvelope([]byte(tc)); ok {
+			t.Fatalf("fast scan accepted invalid payload %q", tc)
+		}
+		var e *Event
+		if err := Unmarshal([]byte(tc), &e); err == nil && tc != "" {
+			t.Logf("note: reference decoder also accepts %q", tc)
+		}
+	}
+
+	// Invariant: whatever the fast scan accepts, the reference decoder must
+	// accept with identical envelope fields. Checked over truncations and
+	// byte mutations of a valid payload.
+	base := []byte(`{"t":"MESSAGE_CREATE","s":17,"op":0,"d":{"id":"9","content":"a[b{c}d\"e\\f","n":-1.5e2,"ok":true,"nil":null}}`)
+	for i := 0; i <= len(base); i++ {
+		trunc := base[:i]
+		ge, ok := parseGatewayEnvelope(trunc)
+		var want *Event
+		err := Unmarshal(trunc, &want)
+		if ok {
+			if err != nil {
+				t.Fatalf("fast scan accepted %q which the decoder rejects: %v", trunc, err)
+			}
+			if ge.op != want.Operation || ge.seq != want.Sequence || ge.typ != want.Type {
+				t.Fatalf("mutation mismatch for %q", trunc)
+			}
+		}
+	}
+	for i := 0; i < len(base); i++ {
+		for _, repl := range []byte{'"', 'x', '{', '[', '}', ']', ':', ',', '0', '-', ' ', '\\'} {
+			mut := append(append([]byte{}, base[:i]...), repl)
+			mut = append(mut, base[i+1:]...)
+			ge, ok := parseGatewayEnvelope(mut)
+			var want *Event
+			err := Unmarshal(mut, &want)
+			if ok {
+				if err != nil {
+					t.Fatalf("fast scan accepted %q which the decoder rejects: %v", mut, err)
+				}
+				if ge.op != want.Operation || ge.seq != want.Sequence || ge.typ != want.Type {
+					t.Fatalf("mutation mismatch for %q", mut)
+				}
+			}
+		}
+	}
+}
+
+func TestOnEventFastPathEquivalence(t *testing.T) {
+	s, _ := New("Bot test-token")
+	payload := []byte(`{"t":"MESSAGE_CREATE","s":7,"op":0,"d":{"id":"42","channel_id":"c","author":{"id":"u","username":"n"},"content":"hello"}}`)
+	e, err := s.onEvent(int(1), payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.Operation != 0 || e.Sequence != 7 || e.Type != "MESSAGE_CREATE" {
+		t.Fatalf("bad envelope: op=%d seq=%d type=%q", e.Operation, e.Sequence, e.Type)
+	}
+	mc, ok := e.Struct.(*MessageCreate)
+	if !ok || mc.Message == nil {
+		t.Fatal("typed struct not decoded")
+	}
+	if mc.ID != "42" || mc.ChannelID != "c" || mc.Content != "hello" || mc.Author == nil || mc.Author.ID != "u" {
+		t.Fatalf("bad decoded message: %+v", mc.Message)
+	}
+	if e.RawData == nil || !bytes.Contains(e.RawData, []byte(`"hello"`)) {
+		t.Fatalf("RawData lost: %s", e.RawData)
+	}
+	// GuildID is set by MessageCreate.UnmarshalJSON from the message context.
+	if mc.GuildID != "" {
+		t.Fatalf("unexpected GuildID: %q", mc.GuildID)
 	}
 }

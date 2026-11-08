@@ -98,7 +98,8 @@ func marshalTimestampOrClear(t *time.Time) (json.RawMessage, error) {
 //
 // guildID    : The ID of the guild.
 // params     : The actions to set. Zero times inside the params clear the
-//              corresponding restriction.
+//
+//	corresponding restriction.
 //
 // Returns the updated IncidentsData of the guild.
 func (s *Session) GuildIncidentActionsEdit(guildID string, params *GuildIncidentActionsParams, options ...RequestOption) (incidents *IncidentsData, err error) {

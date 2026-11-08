@@ -4,6 +4,48 @@ All notable changes in this fork relative to upstream
 [bwmarrin/discordgo](https://github.com/bwmarrin/discordgo) are documented
 here.
 
+## v1.7.0
+
+### Fixed
+- Five more voice data races and a nil panic, continuing the
+  snapshot-under-lock audit from v1.6.0: the OP5 handler read the
+  speaking-update handler slice without the voice lock while
+  `AddHandler` appends under it; the OP2 READY handler wrote `v.op2`
+  unlocked while `udpOpen`/`opusSender` read it (a repeated OP2, e.g. a
+  voice-server change, raced a live sender); the public `OpusSend` /
+  `OpusRecv` channels were assigned unlocked and the `udpConn` snapshot
+  straddled two lock sections (TOCTOU against `udpOpen`); `opusSender`
+  read `v.op2.SSRC` unlocked in the hot loop; and `Disconnect` read
+  `v.GuildID` twice unlocked, so a voice-server change could delete the
+  wrong map entry. Plus `MultipartBodyWithJSON` now returns an error
+  instead of panicking on a nil file / nil `Reader`.
+- gofmt fix in the `GuildIncidentActionsEdit` doc comment (this was the
+  cause of the CI lint failure on the v1.6.0 push).
+
+### Changed (performance)
+- Gateway dispatch path (`onEvent`): the fixed envelope fields (op/s/t/d)
+  are extracted by a strict single-pass scan instead of a full JSON decode,
+  removing the second full parse of the payload and the `RawData` copy that
+  preceded the typed decode. Anything unexpected falls back to the general
+  decoder (goccy/sonic builds included), so acceptance is never looser than
+  `Unmarshal`; `RawData` now aliases the reused read buffer and every
+  in-library consumer is synchronous (raw `__EVENT__` handlers still get
+  their own copy). Measured with benchstat (n=6): dispatch −20% time,
+  compressed frames −19% time / −9% bytes / 10→9 allocs, 4 KiB events
+  −17% time / −47% bytes.
+- Voice-state lookups in `State` are indexed: `VoiceState()` was a linear
+  scan over `Guild.VoiceStates` (run without the state read lock — also a
+  data race fixed here) and is now an O(1) map lookup, maintained by
+  `GuildAdd` / `voiceStateUpdate` / `GuildRemove` / `onReady` alongside the
+  existing message and presence indexes.
+- Hot `State` paths take one lock instead of two: `MessageAdd`,
+  `messageRemoveByID`, `Message` and `voiceStateUpdate` used to acquire a
+  read lock via `Channel()`/`Guild()` before re-acquiring the write lock.
+- New benchmarks: `BenchmarkStateVoiceStateLookup` (10k voice states),
+  `BenchmarkStateMessageCreatePath`; envelope tests in `fork_test.go`
+  cross-check the fast scan against the JSON decoder over truncations and
+  byte mutations.
+
 ## v1.6.0
 
 ### Fixed (voice)

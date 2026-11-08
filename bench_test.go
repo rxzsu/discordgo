@@ -180,3 +180,40 @@ func BenchmarkOnEventLarge(b *testing.B) {
 		_, _ = s.onEvent(int(websocket.MessageText), payload)
 	}
 }
+
+func BenchmarkStateVoiceStateLookup(b *testing.B) {
+	// O(1) indexed lookup after GuildAdd indexed 10k voice states: the old
+	// implementation scanned guild.VoiceStates linearly on every lookup.
+	st := NewState()
+	g := &Guild{ID: "g1"}
+	for i := 0; i < 10000; i++ {
+		g.VoiceStates = append(g.VoiceStates, &VoiceState{GuildID: "g1", UserID: "u" + strconv.Itoa(i), ChannelID: "c"})
+	}
+	if err := st.GuildAdd(g); err != nil {
+		b.Fatal(err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := st.VoiceState("g1", "u5000"); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkStateMessageCreatePath(b *testing.B) {
+	// MessageAdd with a fresh channel and unique message IDs: append plus
+	// MaxMessageCount eviction, the shape of a real MESSAGE_CREATE under
+	// state tracking.
+	st := NewState()
+	if err := st.GuildAdd(&Guild{ID: "g1", Channels: []*Channel{{ID: "c1", GuildID: "g1", Messages: []*Message{}}}}); err != nil {
+		b.Fatal(err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = st.MessageAdd(&Message{ID: strconv.Itoa(i), ChannelID: "c1"})
+	}
+}

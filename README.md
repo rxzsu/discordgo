@@ -51,6 +51,12 @@ differences from upstream.
 - **Guild Member Verification API**: `GuildMemberVerification` and
   `GuildMemberVerificationEdit` read and update a community guild's
   verification form.
+- **Guild Welcome Screen and Vanity URL APIs**: `GuildWelcomeScreen` /
+  `GuildWelcomeScreenEdit` and `GuildVanityURL` / `GuildVanityURLEdit`
+  manage the community welcome screen and the custom invite code.
+- **Partial onboarding edits**: `GuildOnboardingEditPartial` updates only
+  the supplied onboarding fields (prompts, default channels, enabled flag)
+  via `?partial=true` instead of rewriting the whole flow.
 
 ### Breaking changes vs upstream
 
@@ -175,7 +181,7 @@ The examples in [examples/](examples/) demonstrate the most common features.
 
 ## Roadmap to v1.0
 
-The fork is currently at **v1.6.0**. The original v1.0 roadmap is retained
+The fork is currently at **v1.7.0**. The original v1.0 roadmap is retained
 below as historical context:
 
 - [x] Modern toolchain (Go 1.27) and maintained websocket dependency

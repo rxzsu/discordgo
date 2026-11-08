@@ -114,6 +114,8 @@ var (
 	EndpointGuildOnboarding          = func(gID string) string { return EndpointGuilds + gID + "/onboarding" }
 	EndpointGuildIncidentActions     = func(gID string) string { return EndpointGuild(gID) + "/incident-actions" }
 	EndpointGuildMemberVerification  = func(gID string) string { return EndpointGuild(gID) + "/member-verification" }
+	EndpointGuildWelcomeScreen       = func(gID string) string { return EndpointGuild(gID) + "/welcome-screen" }
+	EndpointGuildVanityURL           = func(gID string) string { return EndpointGuild(gID) + "/vanity-url" }
 	EndpointGuildTemplate            = func(tID string) string { return EndpointGuilds + "templates/" + tID }
 	EndpointGuildTemplates           = func(gID string) string { return EndpointGuilds + gID + "/templates" }
 	EndpointGuildTemplateSync        = func(gID, tID string) string { return EndpointGuilds + gID + "/templates/" + tID }

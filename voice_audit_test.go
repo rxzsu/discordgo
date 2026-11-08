@@ -5,6 +5,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/binary"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -232,4 +233,156 @@ func TestVoiceOnEventOp2CloseRace(t *testing.T) {
 	}
 	close(stop)
 	closerWG.Wait()
+}
+
+// onEvent OP5 used to read v.voiceSpeakingUpdateHandlers without the lock
+// while AddHandler appends to the slice under the lock.
+func TestVoiceOnEventOp5HandlersRace(t *testing.T) {
+	v := &VoiceConnection{}
+	msg := []byte(`{"op":5,"d":{"user_id":"1","ssrc":1,"speaking":true}}`)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	stop := make(chan struct{})
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			v.onEvent(msg)
+		}
+		close(stop)
+	}()
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			v.AddHandler(func(vc *VoiceConnection, vs *VoiceSpeakingUpdate) {})
+		}
+	}()
+	wg.Wait()
+}
+
+// onEvent OP2 used to write v.op2, v.OpusSend and v.OpusRecv without the
+// lock while other goroutines (a concurrent OP2 handler, opusSender and
+// user code reading the public channel fields) read them concurrently.
+func TestVoiceOnEventOp2OpusFieldsRace(t *testing.T) {
+	// Local UDP server answering the IP discovery handshake so the OP2
+	// path runs to completion.
+	udpSrv, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatalf("listen udp: %v", err)
+	}
+	defer udpSrv.Close()
+	port := udpSrv.LocalAddr().(*net.UDPAddr).Port
+
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			n, addr, err := udpSrv.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			if n == 74 && binary.BigEndian.Uint16(buf[0:2]) == 1 {
+				resp := make([]byte, 74)
+				binary.BigEndian.PutUint16(resp, 2)
+				binary.BigEndian.PutUint16(resp[2:], 70)
+				binary.BigEndian.PutUint32(resp[4:], binary.BigEndian.Uint32(buf[4:8]))
+				copy(resp[8:], "127.0.0.1")
+				binary.BigEndian.PutUint16(resp[72:], uint16(port))
+				_, _ = udpSrv.WriteToUDP(resp, addr)
+			}
+		}
+	}()
+
+	_, conn := newVoiceGatewayServer(t)
+	v := &VoiceConnection{
+		GuildID:  "g1",
+		UserID:   "u1",
+		endpoint: "voice.example",
+		wsConn:   conn,
+		close:    make(chan struct{}),
+	}
+	msg := []byte(fmt.Sprintf(`{"op":2,"d":{"ssrc":7,"port":%d,"modes":["aead_aes256_gcm_rtpsize"],"heartbeat_interval":5000,"ip":"127.0.0.1"}}`, port))
+
+	// Read the public audio channels under the voice lock (as synchronized
+	// internal code does) while the OP2 handler allocates them. The OP2
+	// handler used to assign these fields without the lock, racing with
+	// any locked reader.
+	stop := make(chan struct{})
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			v.RLock()
+			_ = v.OpusSend
+			_ = v.OpusRecv
+			_ = v.op2
+			v.RUnlock()
+		}
+	}()
+
+	v.onEvent(msg)
+	close(stop)
+	<-readerDone
+
+	v.Close()
+
+	if v.OpusSend == nil {
+		t.Fatal("OP2 did not allocate OpusSend")
+	}
+	if v.OpusRecv == nil {
+		t.Fatal("OP2 did not allocate OpusRecv")
+	}
+	if v.udpConn != nil {
+		t.Fatal("Close did not clear udpConn")
+	}
+}
+
+// Disconnect used to read v.GuildID without the lock (log line and session
+// map delete) while onVoiceServerUpdate rewrites it under the lock.
+func TestVoiceDisconnectGuildIDRace(t *testing.T) {
+	s, _ := New("")
+	s.VoiceConnections = map[string]*VoiceConnection{}
+	v := &VoiceConnection{session: s, GuildID: "g1", sessionID: "sid"}
+	s.VoiceConnections["g1"] = v
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	stop := make(chan struct{})
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 50; i++ {
+			_ = v.Disconnect()
+			// Restore state so the next Disconnect takes the OP4 path.
+			v.Lock()
+			v.sessionID = "sid"
+			v.Unlock()
+			s.Lock()
+			s.VoiceConnections["g1"] = v
+			s.Unlock()
+		}
+		close(stop)
+	}()
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			v.Lock()
+			v.GuildID = "g1"
+			v.Unlock()
+		}
+	}()
+	wg.Wait()
 }

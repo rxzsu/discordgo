@@ -177,10 +177,16 @@ func (v *VoiceConnection) ChangeChannel(channelID string, mute, deaf bool) (err 
 // and udp connections to Discord.
 func (v *VoiceConnection) Disconnect() (err error) {
 
+	// Snapshot the guild ID: onVoiceServerUpdate rewrites v.GuildID under
+	// the lock while this function uses it for the OP4 payload and for
+	// unregistering from the session below.
+	v.RLock()
+	guildID := v.GuildID
+	v.RUnlock()
+
 	// Send a OP4 with a nil channel to disconnect
 	v.Lock()
 	if v.sessionID != "" {
-		guildID := v.GuildID
 		data := voiceChannelJoinOp{4, voiceChannelJoinData{&guildID, nil, true, true}}
 		err = v.writeSessionGateway(data)
 		v.sessionID = ""
@@ -190,10 +196,10 @@ func (v *VoiceConnection) Disconnect() (err error) {
 	// Close websocket and udp connections
 	v.Close()
 
-	v.log(LogInformational, "Deleting VoiceConnection %s", v.GuildID)
+	v.log(LogInformational, "Deleting VoiceConnection %s", guildID)
 
 	v.session.Lock()
-	delete(v.session.VoiceConnections, v.GuildID)
+	delete(v.session.VoiceConnections, guildID)
 	v.session.Unlock()
 
 	return
@@ -476,10 +482,17 @@ func (v *VoiceConnection) onEvent(message []byte) {
 
 	case 2: // READY
 
-		if err := json.Unmarshal(e.RawData, &v.op2); err != nil {
+		var op2 voiceOP2
+		if err := json.Unmarshal(e.RawData, &op2); err != nil {
 			v.log(LogError, "OP2 unmarshall error, %s, %s", err, string(e.RawData))
 			return
 		}
+
+		// Publish under the lock: udpOpen/opusSender read v.op2 while a
+		// concurrent OP2 (voice server change) may overwrite it.
+		v.Lock()
+		v.op2 = op2
+		v.Unlock()
 
 		// Snapshot the connection state under the lock: Close may nil
 		// v.wsConn/v.close concurrently and the goroutines below would
@@ -489,7 +502,7 @@ func (v *VoiceConnection) onEvent(message []byte) {
 		v.RUnlock()
 
 		// Start the voice websocket heartbeat to keep the connection alive
-		go v.wsHeartbeat(wsConn, closeCh, v.op2.HeartbeatInterval)
+		go v.wsHeartbeat(wsConn, closeCh, op2.HeartbeatInterval)
 		// TODO monitor a chan/bool to verify this was successful
 
 		// Start the UDP connection
@@ -502,21 +515,27 @@ func (v *VoiceConnection) onEvent(message []byte) {
 		// Start the opusSender.
 		// TODO: Should we allow 48000/960 values to be user defined?
 		// answer: no, 48k is required as per discord documentaiton and 960 is the most optimal frame size (based on testing)
+		// Allocate the audio channels and snapshot the udp connection under
+		// the lock: OpusSend/OpusRecv are public fields read by user
+		// goroutines, and udpOpen replaces v.udpConn concurrently.
+		v.Lock()
 		if v.OpusSend == nil {
 			v.OpusSend = make(chan []byte, 2)
 		}
-		v.RLock()
-		udpConn := v.udpConn
-		v.RUnlock()
-		go v.opusSender(udpConn, closeCh, v.OpusSend, 48000, 960)
-
-		// Start the opusReceiver
+		udpConn, opusSend := v.udpConn, v.OpusSend
+		var opusRecv chan *Packet
 		if !deaf {
 			if v.OpusRecv == nil {
 				v.OpusRecv = make(chan *Packet, 2)
 			}
+			opusRecv = v.OpusRecv
+		}
+		v.Unlock()
+		go v.opusSender(udpConn, closeCh, opusSend, 48000, 960)
 
-			go v.opusReceiver(udpConn, closeCh, v.OpusRecv)
+		// Start the opusReceiver
+		if !deaf {
+			go v.opusReceiver(udpConn, closeCh, opusRecv)
 		}
 
 		return
@@ -544,7 +563,12 @@ func (v *VoiceConnection) onEvent(message []byte) {
 		return
 
 	case 5:
-		if len(v.voiceSpeakingUpdateHandlers) == 0 {
+		// Snapshot the handlers under the lock: AddHandler appends from
+		// user goroutines while events are dispatched concurrently.
+		v.RLock()
+		handlers := v.voiceSpeakingUpdateHandlers
+		v.RUnlock()
+		if len(handlers) == 0 {
 			return
 		}
 
@@ -554,7 +578,7 @@ func (v *VoiceConnection) onEvent(message []byte) {
 			return
 		}
 
-		for _, h := range v.voiceSpeakingUpdateHandlers {
+		for _, h := range handlers {
 			h(v, voiceSpeakingUpdate)
 		}
 
@@ -816,7 +840,12 @@ func (v *VoiceConnection) opusSender(udpConn *net.UDPConn, close <-chan struct{}
 	// build the parts that don't change in the udpHeader
 	udpHeader[0] = 0x80
 	udpHeader[1] = 0x78
-	binary.BigEndian.PutUint32(udpHeader[8:], v.op2.SSRC)
+	// Snapshot the SSRC under the lock: a concurrent OP2 (voice server
+	// change) rewrites v.op2 under the lock.
+	v.RLock()
+	ssrc := v.op2.SSRC
+	v.RUnlock()
+	binary.BigEndian.PutUint32(udpHeader[8:], ssrc)
 
 	// start a send loop that loops until buf chan is closed
 	ticker := time.NewTicker(time.Millisecond * time.Duration(size/(rate/1000)))

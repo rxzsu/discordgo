@@ -56,6 +56,19 @@ type resumePacket struct {
 	} `json:"d"`
 }
 
+// wsZlibStream wraps a zlib reader together with its source. Both live for
+// the lifetime of the session: resetting the same bytes.Reader per message
+// avoids a per-frame allocation that a fresh bytes.NewReader would pay when
+// it escapes into Reset.
+type wsZlibStream struct {
+	zr  io.ReadCloser
+	src bytes.Reader
+}
+
+func (w *wsZlibStream) Read(p []byte) (int, error) { return w.zr.Read(p) }
+
+func (w *wsZlibStream) Close() error { return w.zr.Close() }
+
 // Open creates a websocket connection to Discord.
 // See: https://discord.com/developers/docs/topics/gateway#connecting
 func (s *Session) Open() error {
@@ -644,6 +657,331 @@ func (s *Session) requestGuildMembers(data requestGuildMembersData) (err error) 
 //
 // If you use the AddHandler() function to register a handler for the
 // "OnEvent" event then all events will be passed to that handler.
+// gatewayEnvelope holds the fixed fields of a gateway payload, extracted by
+// parseGatewayEnvelope without a full JSON decode.
+type gatewayEnvelope struct {
+	op   int
+	seq  int64
+	typ  string
+	data []byte
+}
+
+// wsSkipWS returns the index of the first non-whitespace byte at or after i.
+func wsSkipWS(p []byte, i int) int {
+	for i < len(p) {
+		switch p[i] {
+		case ' ', '\t', '\r', '\n':
+			i++
+		default:
+			return i
+		}
+	}
+	return i
+}
+
+// wsSkipString skips a JSON string; i must point at the opening quote. It
+// validates escape sequences and rejects raw control characters, so a
+// successful return means the value really is a JSON string.
+func wsSkipString(p []byte, i int) (int, bool) {
+	i++ // opening quote
+	for i < len(p) {
+		c := p[i]
+		switch {
+		case c == '"':
+			return i + 1, true
+		case c == '\\':
+			i++
+			if i >= len(p) {
+				return 0, false
+			}
+			switch p[i] {
+			case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
+				i++
+			case 'u':
+				for k := 1; k <= 4; k++ {
+					if i+k >= len(p) {
+						return 0, false
+					}
+					c := p[i+k]
+					if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+						return 0, false
+					}
+				}
+				i += 5
+			default:
+				return 0, false
+			}
+		case c < 0x20:
+			return 0, false
+		default:
+			i++
+		}
+	}
+	return 0, false
+}
+
+// wsSkipNumber skips a JSON number (int, float, exponent), strictly.
+func wsSkipNumber(p []byte, i int) (int, bool) {
+	if i < len(p) && p[i] == '-' {
+		i++
+	}
+	if i >= len(p) || p[i] < '0' || p[i] > '9' {
+		return 0, false
+	}
+	if p[i] == '0' {
+		i++
+	} else {
+		for i < len(p) && p[i] >= '0' && p[i] <= '9' {
+			i++
+		}
+	}
+	if i < len(p) && p[i] == '.' {
+		i++
+		if i >= len(p) || p[i] < '0' || p[i] > '9' {
+			return 0, false
+		}
+		for i < len(p) && p[i] >= '0' && p[i] <= '9' {
+			i++
+		}
+	}
+	if i < len(p) && (p[i] == 'e' || p[i] == 'E') {
+		i++
+		if i < len(p) && (p[i] == '+' || p[i] == '-') {
+			i++
+		}
+		if i >= len(p) || p[i] < '0' || p[i] > '9' {
+			return 0, false
+		}
+		for i < len(p) && p[i] >= '0' && p[i] <= '9' {
+			i++
+		}
+	}
+	return i, true
+}
+
+// wsSkipLiteral skips one of the JSON literals true/false/null.
+func wsSkipLiteral(p []byte, i int, lit string) (int, bool) {
+	if i+len(lit) > len(p) || string(p[i:i+len(lit)]) != lit {
+		return 0, false
+	}
+	return i + len(lit), true
+}
+
+// wsSkipComposite skips a JSON object or array starting at i, validating
+// every element: keys and values are parsed (values recursively, so nested
+// containers, strings and escaped quotes cannot desynchronize the structure).
+func wsSkipComposite(p []byte, i int) (int, bool) {
+	i = wsSkipWS(p, i)
+	if i >= len(p) {
+		return 0, false
+	}
+	isObj := p[i] == '{'
+	if !isObj && p[i] != '[' {
+		return 0, false
+	}
+	i = wsSkipWS(p, i+1)
+	if i < len(p) && ((isObj && p[i] == '}') || (!isObj && p[i] == ']')) {
+		return i + 1, true
+	}
+	for {
+		if isObj {
+			if i >= len(p) || p[i] != '"' {
+				return 0, false
+			}
+			j, ok := wsSkipString(p, i)
+			if !ok {
+				return 0, false
+			}
+			i = wsSkipWS(p, j)
+			if i >= len(p) || p[i] != ':' {
+				return 0, false
+			}
+			i = wsSkipWS(p, i+1)
+		}
+		var ok bool
+		i, ok = wsSkipValue(p, i)
+		if !ok {
+			return 0, false
+		}
+		i = wsSkipWS(p, i)
+		if i >= len(p) {
+			return 0, false
+		}
+		switch {
+		case p[i] == ',':
+			i = wsSkipWS(p, i+1)
+		case isObj && p[i] == '}':
+			return i + 1, true
+		case !isObj && p[i] == ']':
+			return i + 1, true
+		default:
+			return 0, false
+		}
+	}
+}
+
+// wsSkipValue skips any JSON value starting at i.
+func wsSkipValue(p []byte, i int) (int, bool) {
+	i = wsSkipWS(p, i)
+	if i >= len(p) {
+		return 0, false
+	}
+	switch c := p[i]; {
+	case c == '"':
+		return wsSkipString(p, i)
+	case c == '{' || c == '[':
+		return wsSkipComposite(p, i)
+	case c == 't':
+		return wsSkipLiteral(p, i, "true")
+	case c == 'f':
+		return wsSkipLiteral(p, i, "false")
+	case c == 'n':
+		return wsSkipLiteral(p, i, "null")
+	default:
+		return wsSkipNumber(p, i)
+	}
+}
+
+// wsParseInt parses a JSON integer (optionally signed) at i.
+func wsParseInt(p []byte, i int) (int64, int, bool) {
+	neg := false
+	if i < len(p) && p[i] == '-' {
+		neg = true
+		i++
+	}
+	if i >= len(p) || p[i] < '0' || p[i] > '9' {
+		return 0, 0, false
+	}
+	var v int64
+	// Leading zero must not be followed by more digits (strict JSON).
+	if p[i] == '0' {
+		i++
+	} else {
+		for i < len(p) && p[i] >= '0' && p[i] <= '9' {
+			d := int64(p[i] - '0')
+			if v > (1<<62)/10 {
+				return 0, 0, false // overflow: fall back to the JSON decoder
+			}
+			v = v*10 + d
+			i++
+		}
+	}
+	if neg {
+		v = -v
+	}
+	return v, i, true
+}
+
+// parseGatewayEnvelope extracts op, s, t and d from a gateway payload with a
+// single byte scan instead of a full JSON decode. It returns ok=false for
+// anything that is not exactly a flat JSON object with well-formed values, so
+// the caller can fall back to the general decoder; on ok=true the payload has
+// been fully validated structurally. ge.data aliases payload (see the
+// aliasing note in onEvent).
+func parseGatewayEnvelope(payload []byte) (ge gatewayEnvelope, ok bool) {
+	n := len(payload)
+	i := wsSkipWS(payload, 0)
+	if i >= n || payload[i] != '{' {
+		return ge, false
+	}
+	i = wsSkipWS(payload, i+1)
+	if i < n && payload[i] == '}' {
+		if wsSkipWS(payload, i+1) == n {
+			return ge, true
+		}
+		return ge, false
+	}
+
+	var haveOp, haveSeq, haveTyp, haveData bool
+	for {
+		if i >= n || payload[i] != '"' {
+			return ge, false
+		}
+		keyStart := i + 1
+		j, ok := wsSkipString(payload, i)
+		if !ok {
+			return ge, false
+		}
+		key := payload[keyStart : j-1]
+
+		i = wsSkipWS(payload, j)
+		if i >= n || payload[i] != ':' {
+			return ge, false
+		}
+		i = wsSkipWS(payload, i+1)
+
+		switch string(key) {
+		case "op":
+			v, k, ok := wsParseInt(payload, i)
+			if !ok || haveOp {
+				return ge, false
+			}
+			ge.op, haveOp, i = int(v), true, k
+		case "s":
+			v, k, ok := wsParseInt(payload, i)
+			if !ok || haveSeq {
+				return ge, false
+			}
+			ge.seq, haveSeq, i = v, true, k
+		case "t":
+			if haveTyp {
+				return ge, false
+			}
+			if i < n && payload[i] == 'n' {
+				k, ok := wsSkipLiteral(payload, i, "null")
+				if !ok {
+					return ge, false
+				}
+				i = k
+			} else {
+				if i >= n || payload[i] != '"' {
+					return ge, false
+				}
+				vs := i + 1
+				k, ok := wsSkipString(payload, i)
+				if !ok {
+					return ge, false
+				}
+				// Event names are plain ASCII; an escaped name is legal but
+				// never sent by the gateway — let the fallback decode it.
+				if bytes.IndexByte(payload[vs:k-1], '\\') >= 0 {
+					return ge, false
+				}
+				ge.typ, haveTyp, i = string(payload[vs:k-1]), true, k
+			}
+		case "d":
+			k, ok := wsSkipValue(payload, i)
+			if !ok || haveData {
+				return ge, false
+			}
+			ge.data, haveData, i = payload[i:k], true, k
+		default:
+			k, ok := wsSkipValue(payload, i)
+			if !ok {
+				return ge, false
+			}
+			i = k
+		}
+
+		i = wsSkipWS(payload, i)
+		if i >= n {
+			return ge, false
+		}
+		switch payload[i] {
+		case ',':
+			i = wsSkipWS(payload, i+1)
+		case '}':
+			i++
+			if wsSkipWS(payload, i) != n {
+				return ge, false
+			}
+			return ge, true
+		default:
+			return ge, false
+		}
+	}
+}
+
 func (s *Session) onEvent(messageType int, message []byte) (*Event, error) {
 
 	var (
@@ -656,21 +994,31 @@ func (s *Session) onEvent(messageType int, message []byte) (*Event, error) {
 		// compress/zlib's reader implements flate.Resetter, so one
 		// long-lived reader per session replaces the fresh reader (and
 		// its 32KB window) plus a fresh output buffer on every message.
+		// The wsZlibStream wrapper also keeps the bytes.Reader source
+		// long-lived: a fresh bytes.NewReader per message would escape
+		// through Reset and allocate on every compressed frame.
 		// Only the listen goroutine and Open call onEvent, so these
 		// fields need no extra synchronization.
 		s.zMu.Lock()
 		if s.zr == nil {
-			z, err2 := zlib.NewReader(bytes.NewReader(message))
+			zs := &wsZlibStream{}
+			zs.src.Reset(message)
+			z, err2 := zlib.NewReader(&zs.src)
 			if err2 != nil {
 				s.zMu.Unlock()
 				s.log(LogError, "error uncompressing websocket message, %s", err2)
 				return nil, err2
 			}
-			s.zr = z
-		} else if err2 := s.zr.(zlib.Resetter).Reset(bytes.NewReader(message), nil); err2 != nil {
-			s.zMu.Unlock()
-			s.log(LogError, "error resetting zlib reader, %s", err2)
-			return nil, err2
+			zs.zr = z
+			s.zr = zs
+		} else {
+			zs := s.zr.(*wsZlibStream)
+			zs.src.Reset(message)
+			if err2 := zs.zr.(zlib.Resetter).Reset(&zs.src, nil); err2 != nil {
+				s.zMu.Unlock()
+				s.log(LogError, "error resetting zlib reader, %s", err2)
+				return nil, err2
+			}
 		}
 
 		s.zbuf.Reset()
@@ -686,8 +1034,25 @@ func (s *Session) onEvent(messageType int, message []byte) (*Event, error) {
 	}
 
 	// Decode the event into an Event struct.
+	//
+	// The gateway envelope (op/s/t/d) is extracted by a hand-rolled scan on
+	// the hot path: a full decode parses and copies the entire "d" value into
+	// RawData before the typed struct below parses the very same bytes again.
+	// The scan validates the payload strictly and falls back to the general
+	// decoder for anything unexpected, so acceptance is never looser than
+	// Unmarshal. RawData produced by the fast path aliases payload (the
+	// websocket read buffer or the reused zlib buffer): every in-library
+	// consumer is synchronous, and the raw-handler path below copies RawData
+	// before dispatching it, so nothing retains the aliased bytes.
 	var e *Event
-	if err := Unmarshal(payload, &e); err != nil {
+	if ge, ok := parseGatewayEnvelope(payload); ok {
+		e = &Event{
+			Operation: ge.op,
+			Sequence:  ge.seq,
+			Type:      ge.typ,
+			RawData:   json.RawMessage(ge.data),
+		}
+	} else if err := Unmarshal(payload, &e); err != nil {
 		s.log(LogError, "error decoding websocket message, %s", err)
 		return e, err
 	}
