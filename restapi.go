@@ -253,6 +253,17 @@ func (s *Session) RequestWithBucketID(method, urlStr string, data interface{}, b
 	return s.RequestRaw(method, urlStr, "application/json", body, bucketID, 0, options...)
 }
 
+// Canonical spellings of the request headers set on every REST call.
+// Header.Set re-canonicalizes the key on every invocation; "authorization"
+// as written is NOT canonical, so each request paid a scan plus an
+// allocation of the corrected key. Indexing the header map directly with
+// precomputed canonical keys is exactly equivalent.
+var (
+	canonAuthorization = http.CanonicalHeaderKey("Authorization")
+	canonContentType   = http.CanonicalHeaderKey("Content-Type")
+	canonUserAgent     = http.CanonicalHeaderKey("User-Agent")
+)
+
 // RequestRaw makes a (GET/POST/...) Requests to Discord REST API.
 // Preferably use the other Request* methods but this lets you send JSON directly if that's what you have.
 // Sequence is the sequence number, if it fails with a 502 it will
@@ -286,7 +297,15 @@ func (s *Session) requestWithBucket(method, urlStr, contentType string, b []byte
 		log.Printf("API REQUEST  PAYLOAD :: [%s]\n", string(b))
 	}
 
-	req, err := http.NewRequest(method, urlStr, bytes.NewBuffer(b))
+	// An empty payload is passed as a nil body: http.NewRequest then leaves
+	// GetBody unset and the transport substitutes http.NoBody, which is what
+	// wrapping an empty bytes.Buffer produced after its empty-buffer fast
+	// path — minus the per-request Buffer and GetBody closure allocations.
+	var reqBody io.Reader
+	if len(b) > 0 {
+		reqBody = bytes.NewBuffer(b)
+	}
+	req, err := http.NewRequest(method, urlStr, reqBody)
 	if err != nil {
 		if locked {
 			_ = bucket.Release(nil)
@@ -297,17 +316,17 @@ func (s *Session) requestWithBucket(method, urlStr, contentType string, b []byte
 	// Not used on initial login..
 	// TODO: Verify if a login, otherwise complain about no-token
 	if s.Token != "" {
-		req.Header.Set("authorization", s.Token)
+		req.Header[canonAuthorization] = []string{s.Token}
 	}
 
 	// Discord's API returns a 400 Bad Request is Content-Type is set, but the
 	// request body is empty.
 	if b != nil {
-		req.Header.Set("Content-Type", contentType)
+		req.Header[canonContentType] = []string{contentType}
 	}
 
 	// TODO: Make a configurable static variable.
-	req.Header.Set("User-Agent", s.UserAgent)
+	req.Header[canonUserAgent] = []string{s.UserAgent}
 
 	cfg := newRequestConfig(s, req)
 	cfg.metrics = metrics
@@ -482,6 +501,11 @@ const maxBodyPrealloc = 1 << 24 // 16 MiB
 // Content-Length within a sane bound, the output buffer is allocated once at
 // exactly that size instead of io.ReadAll's grow-from-512-bytes doubling,
 // which reallocates and copies a multi-kilobyte Discord payload several times.
+//
+// NOTE: a zero Content-Length is NOT special-cased here even though it means
+// "empty body" on the wire: mocked transports in user code routinely return
+// responses with ContentLength unset (zero) alongside a real body, and
+// skipping the read would silently hand those callers an empty response.
 func readBody(resp *http.Response) ([]byte, error) {
 	if resp.ContentLength <= 0 || resp.ContentLength > maxBodyPrealloc {
 		return io.ReadAll(resp.Body)

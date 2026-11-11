@@ -4,6 +4,221 @@ All notable changes in this fork relative to upstream
 [bwmarrin/discordgo](https://github.com/bwmarrin/discordgo) are documented
 here.
 
+## v1.8.0
+
+Large feature release: a webhook-mode interaction server, application
+command sync, typed event handlers and middleware, fluent builders,
+voice audio utilities, a full OAuth2 client flow and a generic TTL cache,
+plus performance work on the REST, gateway and rate-limit paths.
+
+### Added (HTTP interaction server & command sync)
+
+- HTTP interaction server (webhook interactions mode): new `InteractionServer`
+  type is a standalone `http.Handler` that receives Discord interactions over
+  HTTP instead of the gateway — Ed25519 signature verification (`X-Signature-Ed25519`
+  / `X-Signature-Timestamp`, stdlib `crypto/ed25519`, no new dependencies),
+  automatic PING→PONG handshake, per-type handlers (`OnApplicationCommand`,
+  `OnComponent`, `OnAutocomplete`, `OnModalSubmit`, `OnFallback`) that return the
+  interaction response, JSON and multipart (file) responses, optional
+  `AutoDefer` for deferred ACK + REST followups, body size limit, signature
+  timestamp freshness (replay protection) and handler panic recovery
+  (`NewInteractionServer`, `InteractionPublicKeyFromHex`).
+- Application command sync: `Session.ApplicationCommandsSync` compares the
+  desired command set with the registered one by normalized content hash
+  (`ApplicationCommandContentHash`, `ApplicationCommandsEqual`) and issues only
+  the minimal diff — POST per new, PATCH per changed, DELETE per removed
+  (opt-in `DeleteRemoved`), never re-sending unchanged commands, plus a
+  `DryRun` mode and full `ApplicationCommandSyncReport`/plan
+  (`CompareApplicationCommands`). Normalization filters server-assigned fields
+  and API default values so equal content never triggers phantom updates.
+- Local application-command snapshots for offline drift detection (e.g. CI):
+  `Session.ApplicationCommandSnapshot`, `SaveApplicationCommandSnapshot` /
+  `LoadApplicationCommandSnapshot` (JSON) and
+  `ApplicationCommandSnapshot.DiffCommands` diff a desired command set against
+  a saved snapshot with zero API traffic.
+
+### Added (ergonomics)
+
+New capability layer, entirely additive and implemented without touching
+any existing file (typed handlers ride on the existing
+`AddHandler`/dispatch machinery; builders and reply helpers construct the
+regular library structs). None of these APIs exist upstream.
+
+- **Typed event handlers via generics** (`typed.go`): `AddHandlerTyped(s,
+  func(*Session, *MessageCreate) {...})` and `AddHandlerOnceTyped` carry
+  the event type as a compile-time generic parameter, so a handler
+  registered for the wrong event type can no longer compile — upstream's
+  `AddHandler(interface{})` only logs "invalid handler type" at runtime and
+  the handler silently never fires. Implementation is zero-copy: the
+  generic wrapper implements the internal `EventHandler` interface and
+  dispatch keeps the single type assertion of the generated handlers, with
+  full compatibility with the returned remover, once-handlers,
+  `SyncEvents`, `DispatchWorkers` and the raw-dispatch fast path. Event
+  types are resolved by probing the existing handler registry, so every
+  event supported by `AddHandler` — WSAPI and synthetic (`Connect`,
+  `Disconnect`, `RateLimit`, ...) — works, including future additions.
+  Bonus helpers: `WaitForEvent[E](s, timeout, filter)` /
+  `WaitForEventContext[E](ctx, s, filter)` block for the next (optionally
+  filtered) event and always clean up their internal handler.
+- **Builders for messages, embeds and components** (`builders.go`,
+  `builders_components.go`): fluent DSL over the raw structs — `NewEmbed`
+  (title/description/color/timestamp/author/footer/image/thumbnail/
+  fields), `NewMessage` (content, embeds, rows, files, stickers, poll,
+  reply reference, `Send(s, channelID)`), `NewRow` +
+  `NewButton`/`NewPrimaryButton`/`NewSecondaryButton`/`NewSuccessButton`/
+  `NewDangerButton`/`NewLinkButton`, `NewSelectMenu` plus the
+  auto-populated `NewUserSelectMenu`/`NewRoleSelectMenu`/
+  `NewChannelSelectMenu`/`NewMentionableSelectMenu`, and modals via
+  `NewModal` + `NewLabel` + `NewTextInput`. Everything `Build()`s into the
+  existing `MessageSend`/`MessageEmbed`/`ActionsRow`/`Button`/`SelectMenu`/
+  `InteractionResponse` structs — no new wire types, no kernel changes.
+  `Build()` snapshots builder state, so builders stay reusable.
+- **Interaction reply helpers** (`interaction_reply.go`): one-line
+  responses on top of `InteractionRespond`/`FollowupMessageCreate` with
+  `RequestOption` passthrough — `Reply`, `ReplyEphemeral`, `ReplyEmbeds`,
+  `ReplyEmbedsEphemeral`, `ReplyComponents`, `ReplyDeferred`,
+  `ReplyDeferredEphemeral`, `FollowUp`, `FollowUpEphemeral`, `FollowUpData`
+  (all wait=true), `ReplyAutocomplete` (rejects an empty choice list with
+  the new `ErrNoAutocompleteChoices` instead of sending a payload Discord
+  rejects, since the response struct omits empty choices) and
+  `ReplyModal` (consumes the `ModalBuilder` directly).
+
+### Added (voice utilities)
+
+- Paced opus/PCM streaming helpers over the public VoiceConnection API:
+  `SendOpusFrames`, `SendOpusStream`, `SendPCMStream` and `SendPCM16` with
+  a user-supplied `OpusEncodeFunc` — correct 20 ms frame pacing, trailing
+  silence flush (`OpusSilenceFrame`, 5 frames = 100 ms) and graceful stop
+  with draining (`StopVoice`, `WithStopSignal`, `WithGracefulStop`). No
+  new dependencies.
+- DCA stream support, stdlib only: `DCAReader` (auto-detects the `dca0`,
+  JSON-header and raw layouts), `ReadAllDCA` and `ReadDCAFile` — parse
+  DCA files into opus frames and play them with the senders above.
+- Pure PCM toolkit for 16-bit mono 48 kHz audio: `ChunkPCM16`, `PadPCM16`,
+  `StereoToMono16`, `MonoToStereo16`, `ResampleLinear16`, `FadeIn16`,
+  `FadeOut16`, `SilencePCM16`, `MixPCM16`, plus `WaitVoiceReady` and the
+  voice audio constants.
+
+### Added (typed handler middleware)
+
+- Composable middleware for typed event handlers built on
+  `AddHandlerTyped`: `TypedMiddleware[E]`, `UseTyped`, `ChainTyped`
+  (early-exit chains), `AddHandlerTypedWith` / `AddHandlerOnceTypedWith`
+  and a reusable `TypedPipeline[E]`.
+- Builtin middlewares: panic recovery (`RecoverTyped`), handler timing
+  logs (`LogTyped`), scope filtering (`ScopeFilter` +
+  `FilterMessageCreateEvents`, `FilterInteractionEvents`, generic
+  `FilterTyped`/`FilterEq`/`FilterOneOf`/`FilterNot`), event
+  deduplication (`DedupTyped`) and per-key anti-flood token buckets
+  (`ThrottleTyped`).
+
+### Added (OAuth2)
+
+- Full OAuth2 authorization-code flow: `OAuth2Flow.AuthCodeURL` /
+  `AuthCodeURLWithParams`, `ExchangeCode`, `RefreshToken` and the
+  structured `OAuth2Error` (oauth2flow_token.go).
+- `TokenManager`: lazy and forced refresh under a mutex (one refresh
+  shared by N concurrent callers), a background auto-refresh goroutine
+  with jitter, persistence via `SaveJSON`/`LoadJSON`/`SaveFile`/`LoadFile`
+  and an `OnTokenChange` hook (oauth2flow_client.go).
+- `OAuth2Transport`, a RoundTripper that injects the Bearer token and
+  restarts a request after a 401; attach it via
+  `TokenManager.AttachSession` / `.HTTPClient` (oauth2flow_client.go).
+- Scope helpers (23 `OAuth2Scope` constants, `JoinOAuth2Scopes` /
+  `ParseOAuth2Scopes` / `HasOAuth2Scope` and the `OAuth2Scopes*` presets)
+  and Session methods `CurrentApplicationInfo`, `OAuth2CurrentUser`,
+  `OAuth2CurrentUserGuilds`, `OAuth2CurrentUserConnections`,
+  `OAuth2CurrentUserGuildJoin`, plus the `WithBearerToken` request option
+  (oauth2flow_scopes.go).
+
+### Added (TTL cache)
+
+- Generic `TTLCache[K, V]`: TTL with jitter, singleflight `GetOrLoad`,
+  hit/miss metrics, an optional janitor goroutine with `Close`,
+  `MaxEntries`, an `OnEvict` hook and JSON persistence preserving the
+  remaining TTL (ttlcache.go).
+- `CachedSession` — TTL-cached `Channel` / `GuildMember` lookups with
+  deduplication of concurrent requests and automatic invalidation on
+  gateway events (ChannelUpdate / ChannelDelete / GuildMemberUpdate /
+  GuildMemberRemove / GuildDelete) (ttlcache_state.go).
+
+### Added (examples)
+
+- `examples/interaction_server` — webhook-mode interaction bot:
+  `NewInteractionServer` + `InteractionPublicKeyFromHex`,
+  `OnApplicationCommand` / `OnComponent`, inline `*InteractionResponse`
+  returns vs REST `ReplyEphemeral` (204), plain `net/http` on `:8080`
+  (endpoint setup documented in the file header).
+- `examples/builders` — fluent builders: `NewMessage` / `NewEmbed` /
+  `NewRow` with colored buttons and a multi-select menu,
+  `AddHandlerTyped` gateway handling, `ReplyComponents` / `ReplyEphemeral`
+  / `FollowUpEphemeral`.
+- `examples/commands_sync` — `ApplicationCommandsSync` with commands
+  declared in code, `-dry-run` plan-only mode, `-delete-removed` and a
+  printed sync report.
+
+### Fixed
+
+- `State.UserColor` / `State.MessageColor` no longer sort the shared
+  `guild.Roles` slice in place (a data race with concurrent state writers
+  such as `RoleAdd`); they sort a copy instead.
+
+### Changed (performance)
+
+- REST: −20% allocations per request — precomputed canonical header keys
+  instead of `Header.Set` (whose re-canonicalization scan was paid on
+  every request for non-canonical keys like `authorization`), and an empty
+  request body is passed as nil without the `bytes.Buffer`/`GetBody`
+  wrapper.
+- Gateway: one allocation fewer per compressed frame — reusable adler32/
+  flate state and stack buffers replace `zlib.Reset`, which allocated a
+  fresh adler32 digest for every binary frame.
+- Rate limit: allocation-free reading of `Retry-After`/`Date` (−9% on the
+  release path).
+- Measured JSON backend comparison on real payloads: goccy is −21% decode
+  / −66% marshal vs stdlib; sonic only wins on marshal. The default stays
+  stdlib; the `goccy` build tag is recommended for throughput-sensitive
+  deployments.
+- New benchmarks for the gateway write path and the JSON hooks
+  (`wsapi_bench_test.go`, `json_bench_test.go`).
+
+### Compatibility notes
+
+- The module now requires **Go 1.27.4+** (`go 1.27.4` in `go.mod`);
+  CI already tested on the latest 1.27.x patch release.
+- `goccy/go-json` and `bytedance/sonic` are now recorded as direct module
+  requirements (their build-tag files import them; previously listed as
+  indirect). They remain opt-in: builds without `-tags goccy` / `-tags sonic`
+  do not link either package.
+
+### Tests
+
+- `voiceutils_test.go` covers the voice streaming helpers (frame pacing,
+  silence flush, graceful stop), DCA layout sniffing and the PCM toolkit;
+  `middleware_test.go` covers the typed handler middleware chain
+  (recovery, logging, filters, dedup, throttling);
+  `oauth2flow_test.go` covers the authorization-code flow, token
+  refresh/persistence and the transport; `ttlcache_test.go` covers the
+  TTL cache expiry/singleflight/janitor/eviction and the cached session
+  invalidation.
+- `webhookserver_interactionserver_test.go` and `appcmdsync_test.go`
+  cover the interaction server (signature/handshake/defer behaviour) and
+  the command sync/snapshot features above.
+- `typed_test.go`: dispatch through the real `handleEvent` path for
+  WSAPI and synthetic events (table-driven), zero-copy instance-identity
+  check, typed+untyped handlers side by side, once/remove semantics,
+  invalid event type guard, `WaitForEvent` filtering/timeout/cancel and
+  handler-leak check.
+- `builders_test.go`: exact wire-JSON comparison (via the library's
+  replaceable `Marshal`) for embeds, button rows, select menus and modals,
+  including the auto-populated menu variants; `MessageSend` equivalence
+  with hand-written struct literals; `Send()` verified against an
+  httptest server; `Build()` snapshot isolation.
+- `interaction_reply_test.go`: every helper verified against an httptest
+  server — request method, path, query (`wait=true`) and decoded JSON body
+  (response types 4/5/8/9, ephemeral flags, components, modal payload),
+  plus the empty-autocomplete guard.
+
 ## v1.7.0
 
 ### Fixed

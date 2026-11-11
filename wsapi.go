@@ -12,11 +12,15 @@ package discordgo
 
 import (
 	"bytes"
+	"compress/flate"
 	"compress/zlib"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
+	"hash/adler32"
 	"io"
 	"net/http"
 	"sync/atomic"
@@ -24,6 +28,13 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
+)
+
+// RFC 1950 header constants: CMF must select the deflate method with a
+// window no larger than 32K (mirrors compress/zlib's unexported values).
+const (
+	zlibDeflate   = 8
+	zlibMaxWindow = 7
 )
 
 // ErrWSAlreadyOpen is thrown when you attempt to open
@@ -56,18 +67,98 @@ type resumePacket struct {
 	} `json:"d"`
 }
 
-// wsZlibStream wraps a zlib reader together with its source. Both live for
-// the lifetime of the session: resetting the same bytes.Reader per message
-// avoids a per-frame allocation that a fresh bytes.NewReader would pay when
-// it escapes into Reset.
+// wsZlibStream is a minimal RFC 1950 (zlib) reader that keeps its deflate
+// decompressor, adler32 digest and source alive for the whole session,
+// resetting them per message. The gateway emits one independent zlib stream
+// per binary frame, so a reset runs on every message; compress/zlib's
+// Resetter path would additionally re-zero the reader state and allocate a
+// fresh adler32 digest on each of those resets, which this type avoids.
+// Behavior matches compress/zlib: the same header validation, the same
+// trailing-checksum verification, and the same error values (ErrHeader,
+// ErrDictionary, ErrChecksum) for malformed input.
 type wsZlibStream struct {
-	zr  io.ReadCloser
-	src bytes.Reader
+	src     bytes.Reader
+	flateR  io.ReadCloser
+	adler   hash.Hash32
+	scratch [4]byte
+	hdr     [2]byte
+	err     error
 }
 
-func (w *wsZlibStream) Read(p []byte) (int, error) { return w.zr.Read(p) }
+// reset primes the stream to decode one complete zlib stream from message.
+func (w *wsZlibStream) reset(message []byte) error {
+	w.err = nil
+	w.src.Reset(message)
 
-func (w *wsZlibStream) Close() error { return w.zr.Close() }
+	// RFC 1950 section 2.2 header: CMF, FLG. The same validation
+	// compress/zlib performs (deflate method, window size <= 32K, header
+	// checksum). FDICT streams require a preset dictionary that this
+	// library never supplies; compress/zlib reports ErrDictionary there,
+	// so that value is reproduced. The header buffer lives in the struct
+	// (not a local): a local array handed to io.ReadFull escapes and
+	// would heap-allocate on every frame.
+	if _, err := io.ReadFull(&w.src, w.hdr[:]); err != nil {
+		if err == io.EOF {
+			err = io.ErrUnexpectedEOF
+		}
+		w.err = err
+		return err
+	}
+	if w.hdr[0]&0x0f != zlibDeflate || w.hdr[0]>>4 > zlibMaxWindow || binary.BigEndian.Uint16(w.hdr[:])%31 != 0 {
+		w.err = zlib.ErrHeader
+		return zlib.ErrHeader
+	}
+	if w.hdr[1]&0x20 != 0 {
+		w.err = zlib.ErrDictionary
+		return zlib.ErrDictionary
+	}
+
+	if w.flateR == nil {
+		w.flateR = flate.NewReader(&w.src)
+	} else if err := w.flateR.(flate.Resetter).Reset(&w.src, nil); err != nil {
+		w.err = err
+		return err
+	}
+	w.adler.Reset()
+	return nil
+}
+
+func (w *wsZlibStream) Read(p []byte) (int, error) {
+	if w.err != nil {
+		return 0, w.err
+	}
+	n, err := w.flateR.Read(p)
+	if n > 0 {
+		_, _ = w.adler.Write(p[:n])
+	}
+	if err != io.EOF {
+		if err != nil {
+			w.err = err
+		}
+		return n, err
+	}
+	// Stream finished: consume and verify the trailing checksum, then
+	// report EOF exactly like compress/zlib does.
+	if _, w.err = io.ReadFull(&w.src, w.scratch[:]); w.err != nil {
+		if w.err == io.EOF {
+			w.err = io.ErrUnexpectedEOF
+		}
+		return n, w.err
+	}
+	if binary.BigEndian.Uint32(w.scratch[:]) != w.adler.Sum32() {
+		w.err = zlib.ErrChecksum
+		return n, zlib.ErrChecksum
+	}
+	w.err = io.EOF
+	return n, io.EOF
+}
+
+func (w *wsZlibStream) Close() error {
+	if w.flateR != nil {
+		return w.flateR.Close()
+	}
+	return nil
+}
 
 // Open creates a websocket connection to Discord.
 // See: https://discord.com/developers/docs/topics/gateway#connecting
@@ -991,34 +1082,24 @@ func (s *Session) onEvent(messageType int, message []byte) (*Event, error) {
 
 	// If this is a compressed message, uncompress it.
 	if messageType == int(websocket.MessageBinary) {
-		// compress/zlib's reader implements flate.Resetter, so one
-		// long-lived reader per session replaces the fresh reader (and
-		// its 32KB window) plus a fresh output buffer on every message.
-		// The wsZlibStream wrapper also keeps the bytes.Reader source
-		// long-lived: a fresh bytes.NewReader per message would escape
-		// through Reset and allocate on every compressed frame.
+		// One long-lived wsZlibStream per session: its deflate decompressor
+		// (with 32KB window), adler32 digest and bytes.Reader source are all
+		// reset in place per message. A fresh compress/zlib reader per
+		// message would pay the reader allocation plus a 32KB window; zlib's
+		// own Resetter path still allocates a fresh adler32 digest per
+		// message, which wsZlibStream avoids.
 		// Only the listen goroutine and Open call onEvent, so these
 		// fields need no extra synchronization.
 		s.zMu.Lock()
-		if s.zr == nil {
-			zs := &wsZlibStream{}
-			zs.src.Reset(message)
-			z, err2 := zlib.NewReader(&zs.src)
-			if err2 != nil {
-				s.zMu.Unlock()
-				s.log(LogError, "error uncompressing websocket message, %s", err2)
-				return nil, err2
-			}
-			zs.zr = z
+		zs, ok := s.zr.(*wsZlibStream)
+		if !ok {
+			zs = &wsZlibStream{adler: adler32.New()}
 			s.zr = zs
-		} else {
-			zs := s.zr.(*wsZlibStream)
-			zs.src.Reset(message)
-			if err2 := zs.zr.(zlib.Resetter).Reset(&zs.src, nil); err2 != nil {
-				s.zMu.Unlock()
-				s.log(LogError, "error resetting zlib reader, %s", err2)
-				return nil, err2
-			}
+		}
+		if err2 := zs.reset(message); err2 != nil {
+			s.zMu.Unlock()
+			s.log(LogError, "error uncompressing websocket message, %s", err2)
+			return nil, err2
 		}
 
 		s.zbuf.Reset()

@@ -262,6 +262,8 @@ var (
 	canonRateLimitRemaining  = http.CanonicalHeaderKey("X-RateLimit-Remaining")
 	canonRateLimitReset      = http.CanonicalHeaderKey("X-RateLimit-Reset")
 	canonRateLimitResetAfter = http.CanonicalHeaderKey("X-RateLimit-Reset-After")
+	canonRetryAfter          = http.CanonicalHeaderKey("Retry-After")
+	canonDate                = http.CanonicalHeaderKey("Date")
 )
 
 // headerValue is equivalent to headers.Get(key) for an already canonical
@@ -336,7 +338,7 @@ func (b *Bucket) release(headers http.Header, limited *TooManyRequests) error {
 	remaining := headerValue(headers, canonRateLimitRemaining)
 	reset := headerValue(headers, canonRateLimitReset)
 	resetAfter := headerValue(headers, canonRateLimitResetAfter)
-	if retryAfter := headers.Get("Retry-After"); retryAfter != "" {
+	if retryAfter := headerValue(headers, canonRetryAfter); retryAfter != "" {
 		resetAfter = retryAfter
 	}
 
@@ -365,7 +367,7 @@ func (b *Bucket) release(headers http.Header, limited *TooManyRequests) error {
 		}
 	} else if reset != "" {
 		// Calculate the reset time by using the date header returned from discord
-		discordTime, err := http.ParseTime(headers.Get("Date"))
+		discordTime, err := http.ParseTime(headerValue(headers, canonDate))
 		if err != nil {
 			return err
 		}

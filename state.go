@@ -1532,7 +1532,12 @@ func (s *State) MessageColor(message *Message) int {
 }
 
 func firstRoleColorColor(guild *Guild, memberRoles []string) int {
-	roles := Roles(guild.Roles)
+	// Sort a COPY of guild.Roles: sorting the shared slice in place would
+	// race with concurrent state writers (RoleAdd writes guild.Roles[i]
+	// under the state lock) and reorder the slice every call. The color
+	// selection result is identical.
+	roles := make(Roles, len(guild.Roles))
+	copy(roles, guild.Roles)
 	sort.Sort(roles)
 
 	for _, role := range roles {

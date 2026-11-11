@@ -15,7 +15,7 @@ differences from upstream.
 
 ## Differences from upstream (short version)
 
-- **Go 1.27+** required; `github.com/coder/websocket` instead of the
+- **Go 1.27.4+** required; `github.com/coder/websocket` instead of the
   unmaintained `gorilla/websocket`.
 - **Fixed spurious gateway reconnects** caused by a broken heartbeat-ACK
   timeout calculation in upstream.
@@ -57,6 +57,50 @@ differences from upstream.
 - **Partial onboarding edits**: `GuildOnboardingEditPartial` updates only
   the supplied onboarding fields (prompts, default channels, enabled flag)
   via `?partial=true` instead of rewriting the whole flow.
+- **Typed event handlers (generics)**: `AddHandlerTyped` /
+  `AddHandlerOnceTyped` accept `func(*Session, *E)` with the event type as
+  a compile-time generic parameter — a handler registered for the wrong
+  event type is a compile error instead of a handler that silently never
+  fires. Zero-copy dispatch over the existing handler machinery;
+  `WaitForEvent[E]` / `WaitForEventContext[E]` wait for a (filterable)
+  event with a timeout. Upstream only offers `AddHandler(interface{})`.
+- **Builders for messages, embeds, components and modals**: fluent DSL
+  (`NewEmbed`, `NewMessage`, `NewRow`, `NewPrimaryButton`/...,
+  `NewSelectMenu`, `NewModal`, ...) that constructs the regular library
+  structs — no manual struct literals, and `MessageBuilder.Send(s, ch)`
+  posts directly. Upstream requires hand-assembling `MessageSend`,
+  `MessageEmbed`, `ActionsRow`, `Button`, `SelectMenu` and modal payloads.
+- **Interaction reply helpers**: one-line `Reply` / `ReplyEphemeral` /
+  `ReplyEmbeds` / `ReplyComponents` / `ReplyDeferred(+Ephemeral)` /
+  `FollowUp(+Ephemeral)` / `ReplyAutocomplete` / `ReplyModal` on top of
+  `InteractionRespond` / `FollowupMessageCreate` with the usual
+  `RequestOption` support.
+- **HTTP interaction server**: `InteractionServer` is a standalone
+  `http.Handler` that receives Discord interactions over HTTP (webhook
+  mode) instead of the gateway — Ed25519 signature verification,
+  automatic PING handling, per-type handlers, optional auto-defer with
+  REST followups, replay protection and panic recovery.
+- **Application command sync**: `ApplicationCommandsSync` diffs the
+  desired command set against the registered one and issues only the
+  minimal create/update/delete batch (dry-run and report included); JSON
+  snapshots (`SaveApplicationCommandSnapshot`) enable offline drift
+  checks in CI.
+- **Voice audio toolkit**: paced opus/PCM senders (`SendOpusFrames`,
+  `SendOpusStream`, `SendPCMStream`, `SendPCM16`), stdlib-only DCA
+  parsing (`DCAReader`, `ReadAllDCA`, `ReadDCAFile`) and a 16-bit PCM
+  helper set (resample, mix, fades, silence) over the public
+  VoiceConnection API.
+- **Typed handler middleware**: composable `TypedMiddleware[E]` chains
+  (`ChainTyped`, `TypedPipeline`) with builtin panic recovery, timing
+  logs, scope filters, deduplication (`DedupTyped`) and anti-flood
+  throttling (`ThrottleTyped`), applied via `AddHandlerTypedWith`.
+- **OAuth2**: full authorization-code flow (`OAuth2Flow`,
+  `ExchangeCode`, `RefreshToken`), `TokenManager` with mutex-guarded
+  refresh, jittered auto-refresh and persistence, the `OAuth2Transport`
+  RoundTripper and 23 scope helpers with presets.
+- **Generic TTL cache**: `TTLCache[K, V]` (TTL jitter, singleflight
+  `GetOrLoad`, janitor, metrics, persistence) and `CachedSession` for
+  Channel/Member lookups automatically invalidated by gateway events.
 
 ### Breaking changes vs upstream
 
@@ -97,6 +141,12 @@ not materialize at these sizes. The `-tags goccy` / `-tags sonic` files
 (`json_goccy.go` / `json_sonic.go`) set the hooks before any session is
 created, or set `discordgo.Marshal`/`Unmarshal` manually **before**
 calling `discordgo.New()`.
+
+Comparisons on real API payloads (`json_bench_test.go`) confirm the same
+picture on the marshal side: goccy is −21% decode / −66% marshal vs
+stdlib, while sonic only wins on marshal. The default stays stdlib;
+`-tags goccy` is the recommended accelerator for throughput-sensitive
+deployments.
 
 ### Observing REST requests
 
@@ -164,6 +214,36 @@ Discord API functions and to set callback functions for Discord events.
 discord, err := discordgo.New("Bot " + "authentication token")
 ```
 
+The fork additionally provides compile-time typed event handlers, fluent
+builders and one-line interaction replies:
+
+```go
+// Typed handler: wrong event type = compile error, not a silent no-op.
+discordgo.AddHandlerTyped(discord, func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if i.Type != discordgo.InteractionApplicationCommand {
+		return
+	}
+	// One-line ephemeral reply, then the slow work, then a followup.
+	if err := s.ReplyEphemeral(i.Interaction, "Work started"); err != nil {
+		return
+	}
+	// Buttons via the fluent component builders.
+	row := discordgo.NewRow().
+		AddButton(discordgo.NewPrimaryButton("Accept", "role-accept")).
+		AddButton(discordgo.NewDangerButton("Deny", "role-deny")).
+		Build()
+	_ = s.ReplyComponents(i.Interaction, []discordgo.MessageComponent{&row})
+	_, _ = s.FollowUpEphemeral(i.Interaction, "Done")
+})
+
+// Sending messages with embeds:
+_, _ = discordgo.NewMessage().
+	Content("Release!").
+	AddEmbed(discordgo.NewEmbed().Title("v1.8.0").Color(0x5865F2).
+		Field("Typed handlers", "compile-time safe", true)).
+	Send(discord, channelID)
+```
+
 See Documentation and Examples below for more detailed information.
 
 ## Documentation
@@ -177,14 +257,17 @@ source with [Godoc](https://godoc.org):
 - [Godoc for this fork](https://pkg.go.dev/github.com/rxzsu/discordgo)
 - [Upstream documentation site](https://bwmarrin.github.io/discordgo/)
 
-The examples in [examples/](examples/) demonstrate the most common features.
+The examples in [examples/](examples/) demonstrate the most common features,
+including webhook-mode interactions (`examples/interaction_server`), the
+fluent builders (`examples/builders`) and application command syncing
+(`examples/commands_sync`).
 
 ## Roadmap to v1.0
 
-The fork is currently at **v1.7.0**. The original v1.0 roadmap is retained
+The fork is currently at **v1.8.0**. The original v1.0 roadmap is retained
 below as historical context:
 
-- [x] Modern toolchain (Go 1.27) and maintained websocket dependency
+- [x] Modern toolchain (Go 1.27.4) and maintained websocket dependency
 - [x] Context-aware REST core (rate limit waits and retries respect
       cancellation); `WithContext`/`WithTimeout`/`WithQuery` are the
       official way to scope requests — the fork will **not** duplicate

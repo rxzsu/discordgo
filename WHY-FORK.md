@@ -49,7 +49,7 @@ those and adds capabilities upstream lacks.
   golangci-lint at **0 issues**, CodeQL.
 - `github.com/coder/websocket` instead of the unmaintained
   `gorilla/websocket`.
-- Dependency count: **1**.
+- Dependency count: **1 required** (`coder/websocket`); `goccy/go-json` and `bytedance/sonic` are opt-in build-tag JSON accelerators.
 - Every release CI-verified and tagged; deprecations carry proper
   godoc markers; SemVer promised from v1.0.0.
 
