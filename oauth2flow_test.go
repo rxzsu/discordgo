@@ -483,7 +483,7 @@ func TestTokenManagerPersistence(t *testing.T) {
 }
 
 func TestTokenManagerAutoRefresh(t *testing.T) {
-	ft, cfg, cleanup := newFakeTokenEndpoint(t)
+	_, cfg, cleanup := newFakeTokenEndpoint(t)
 	defer cleanup()
 
 	tm := NewTokenManager(cfg, TokenManagerOptions{RefreshEarly: 30 * time.Millisecond})
@@ -497,19 +497,20 @@ func TestTokenManagerAutoRefresh(t *testing.T) {
 		t.Fatalf("second StartAutoRefresh: %v", err)
 	}
 
+	// Wait until the manager has actually applied the refreshed token, not
+	// merely until the fake endpoint counted a grant: seeing the server-side
+	// count does not mean the manager has processed the response yet (this
+	// window is real on loaded CI runners).
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, r := ft.grantCounts(); r > 0 {
+		if cur, ok := tm.Current(); ok && cur.AccessToken != "first" {
 			break
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
-	if _, r := ft.grantCounts(); r == 0 {
-		t.Fatal("auto-refresher did not refresh before expiry")
-	}
-	cur, _ := tm.Current()
-	if cur.AccessToken == "first" {
-		t.Fatal("token not replaced by auto-refresher")
+	cur, ok := tm.Current()
+	if !ok || cur.AccessToken == "first" {
+		t.Fatal("auto-refresher did not replace the token before expiry")
 	}
 
 	tm.Close()
