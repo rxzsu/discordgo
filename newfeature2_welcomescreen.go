@@ -1,14 +1,15 @@
 // This file implements the Guild Welcome Screen REST API.
 //
-// The welcome screen shows a set of channels new members are shown in a
-// community ("Client Onboarding") guild. It is only available for guilds
-// with the WELCOME_SCREEN_ENABLED feature.
+// The welcome screen shows new members suggested channels in a community guild.
 //
 // https://discord.com/developers/docs/resources/guild#welcome-screen-object
 
 package discordgo
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // ErrNilWelcomeScreenParams is returned when a nil GuildWelcomeScreenParams
 // is passed to GuildWelcomeScreenEdit.
@@ -24,9 +25,26 @@ type WelcomeScreenChannel struct {
 	// ID of a custom emoji shown next to the channel, empty for a
 	// unicode emoji or no emoji.
 	EmojiID string `json:"emoji_id"`
-	// Name of a unicode emoji shown next to the channel, empty for a
-	// custom emoji or no emoji.
+	// Name of the custom emoji or the unicode character itself.
+	// Empty when no name is set.
 	EmojiName string `json:"emoji_name"`
+}
+
+// MarshalJSON sends absent emoji fields as null, as expected by Discord.
+func (c WelcomeScreenChannel) MarshalJSON() ([]byte, error) {
+	type welcomeChannel WelcomeScreenChannel
+	wire := struct {
+		welcomeChannel
+		EmojiID   *string `json:"emoji_id"`
+		EmojiName *string `json:"emoji_name"`
+	}{welcomeChannel: welcomeChannel(c)}
+	if c.EmojiID != "" {
+		wire.EmojiID = &c.EmojiID
+	}
+	if c.EmojiName != "" {
+		wire.EmojiName = &c.EmojiName
+	}
+	return Marshal(wire)
 }
 
 // WelcomeScreen is the welcome screen of a community guild.
@@ -47,12 +65,25 @@ type GuildWelcomeScreenParams struct {
 	Enabled *bool `json:"enabled,omitempty"`
 	// Server description shown on the welcome screen.
 	Description *string `json:"description,omitempty"`
-	// Channels (up to 5) shown on the welcome screen.
+	// Channels (up to 5) shown on the welcome screen. An empty non-nil slice clears the list.
 	WelcomeChannels []WelcomeScreenChannel `json:"welcome_channels,omitempty"`
 }
 
+// MarshalJSON distinguishes an omitted channel list from an empty list.
+func (p GuildWelcomeScreenParams) MarshalJSON() ([]byte, error) {
+	type welcomeParams GuildWelcomeScreenParams
+	wire := struct {
+		welcomeParams
+		WelcomeChannels *[]WelcomeScreenChannel `json:"welcome_channels,omitempty"`
+	}{welcomeParams: welcomeParams(p)}
+	if p.WelcomeChannels != nil {
+		wire.WelcomeChannels = &p.WelcomeChannels
+	}
+	return Marshal(wire)
+}
+
 // GuildWelcomeScreen returns the welcome screen of a guild. Requires the
-// MANAGE_GUILD permission.
+// MANAGE_GUILD permission if the screen is disabled.
 //
 // guildID : The ID of the guild.
 func (s *Session) GuildWelcomeScreen(guildID string, options ...RequestOption) (screen *WelcomeScreen, err error) {
@@ -77,6 +108,9 @@ func (s *Session) GuildWelcomeScreenEdit(guildID string, params *GuildWelcomeScr
 	if params == nil {
 		return nil, ErrNilWelcomeScreenParams
 	}
+	if len(params.WelcomeChannels) > 5 {
+		return nil, fmt.Errorf("a welcome screen supports at most 5 channels, got %d", len(params.WelcomeChannels))
+	}
 
 	endpoint := EndpointGuildWelcomeScreen(guildID)
 
@@ -88,4 +122,14 @@ func (s *Session) GuildWelcomeScreenEdit(guildID string, params *GuildWelcomeScr
 
 	err = unmarshal(body, &screen)
 	return
+}
+
+// GuildWelcomeScreenEnable sets the description and enables the welcome screen
+// of a community guild in one request. If channels is nil, the current list
+// is left unchanged. Requires the MANAGE_GUILD permission.
+func (s *Session) GuildWelcomeScreenEnable(guildID, description string, channels []WelcomeScreenChannel, options ...RequestOption) (*WelcomeScreen, error) {
+	enabled := true
+	return s.GuildWelcomeScreenEdit(guildID, &GuildWelcomeScreenParams{
+		Enabled: &enabled, Description: &description, WelcomeChannels: channels,
+	}, options...)
 }

@@ -60,6 +60,9 @@ func TestGuildWelcomeScreenEdit(t *testing.T) {
 		}
 		gotMethod = r.Method
 		gotBody = decodeFeatureTestBody(t, r)
+		if reason := r.Header.Get("X-Audit-Log-Reason"); reason != "setup" {
+			t.Errorf("expected audit reason setup, got %q", reason)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 			"description": "Updated",
@@ -70,15 +73,10 @@ func TestGuildWelcomeScreenEdit(t *testing.T) {
 	}))
 	defer cleanup()
 
-	enabled := true
-	description := "Updated"
-	screen, err := s.GuildWelcomeScreenEdit("g1", &GuildWelcomeScreenParams{
-		Enabled:     &enabled,
-		Description: &description,
-		WelcomeChannels: []WelcomeScreenChannel{
-			{ChannelID: "c9", Description: "New", EmojiName: "🎉"},
-		},
-	})
+	screen, err := s.GuildWelcomeScreenEnable("g1", "Updated", []WelcomeScreenChannel{
+		{ChannelID: "c9", Description: "New", EmojiName: "🎉"},
+		{ChannelID: "c10", Description: "Rules"},
+	}, WithAuditLogReason("setup"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,15 +88,98 @@ func TestGuildWelcomeScreenEdit(t *testing.T) {
 		t.Fatalf("unexpected request body: %v", gotBody)
 	}
 	channels, ok := gotBody["welcome_channels"].([]interface{})
-	if !ok || len(channels) != 1 {
-		t.Fatalf("expected one welcome channel in request body, got %v", gotBody)
+	if !ok || len(channels) != 2 {
+		t.Fatalf("expected two welcome channels in request body, got %v", gotBody)
 	}
 	channel, ok := channels[0].(map[string]interface{})
 	if !ok || channel["channel_id"] != "c9" || channel["emoji_name"] != "🎉" {
 		t.Fatalf("unexpected welcome channel in request body: %v", channels)
 	}
+	for index, key := range []string{"emoji_id", "emoji_name"} {
+		field, ok := channels[index].(map[string]interface{})[key]
+		if !ok || field != nil {
+			t.Fatalf("expected %s to be explicitly null in %v", key, channels[index])
+		}
+	}
 	if screen.Description != "Updated" || len(screen.WelcomeChannels) != 1 {
 		t.Fatalf("unexpected response payload: %+v", screen)
+	}
+}
+
+func TestGuildWelcomeScreenEditClearsChannelList(t *testing.T) {
+	var gotBody map[string]interface{}
+	s, cleanup := newFeatureTestSession(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody = decodeFeatureTestBody(t, r)
+		_, _ = w.Write([]byte(`{"description": "Welcome", "welcome_channels": []}`))
+	}))
+	defer cleanup()
+
+	params := &GuildWelcomeScreenParams{WelcomeChannels: []WelcomeScreenChannel{}}
+	if _, err := s.GuildWelcomeScreenEdit("g1", params); err != nil {
+		t.Fatal(err)
+	}
+	channels, ok := gotBody["welcome_channels"].([]interface{})
+	if !ok || len(channels) != 0 {
+		t.Fatalf("expected an explicit empty array, got %v", gotBody)
+	}
+}
+
+func TestGuildWelcomeScreenEditPreservesExplicitValues(t *testing.T) {
+	var body map[string]interface{}
+	s, cleanup := newFeatureTestSession(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body = decodeFeatureTestBody(t, r)
+		_, _ = w.Write([]byte(`{"description":"","welcome_channels":[]}`))
+	}))
+	defer cleanup()
+
+	enabled := false
+	description := ""
+	_, err := s.GuildWelcomeScreenEdit("g1", &GuildWelcomeScreenParams{
+		Enabled: &enabled, Description: &description,
+		WelcomeChannels: []WelcomeScreenChannel{
+			{ChannelID: "c1", Description: "Start here", EmojiID: "321", EmojiName: "wave"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body["enabled"] != false || body["description"] != "" {
+		t.Fatalf("explicit false and empty description were not sent: %v", body)
+	}
+	channels, ok := body["welcome_channels"].([]interface{})
+	if !ok || len(channels) != 1 {
+		t.Fatalf("expected a single welcome channel: %v", body)
+	}
+	channel, ok := channels[0].(map[string]interface{})
+	if !ok || channel["emoji_id"] != "321" || channel["emoji_name"] != "wave" {
+		t.Fatalf("custom emoji was not sent: %v", channels[0])
+	}
+}
+
+func TestGuildWelcomeScreenEnableReturnsDiscordError(t *testing.T) {
+	s, cleanup := newFeatureTestSession(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"code":10069,"message":"Unknown Guild Welcome Screen"}`))
+	}))
+	defer cleanup()
+
+	screen, err := s.GuildWelcomeScreenEnable("g1", "Welcome", nil)
+	var restErr *RESTError
+	if screen != nil || !errors.As(err, &restErr) || restErr.Code() != ErrCodeUnknownGuildWelcomeScreen {
+		t.Fatalf("expected Discord error 10069 and no screen, got screen=%+v err=%v", screen, err)
+	}
+}
+
+func TestGuildWelcomeScreenEditRejectsTooManyChannels(t *testing.T) {
+	s, cleanup := newFeatureTestSession(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("should reject more than five channels before making a request")
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer cleanup()
+
+	if _, err := s.GuildWelcomeScreenEnable("g1", "Welcome", make([]WelcomeScreenChannel, 6)); err == nil {
+		t.Fatal("expected an error for six welcome channels")
 	}
 }
 

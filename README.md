@@ -40,6 +40,10 @@ differences from upstream.
 - **Per-shard configuration**: `ShardingConfig.ConfigureSession` sets
   intents, HTTP clients and other session options before connecting. It
   also configures the temporary session used for gateway discovery.
+- **Gateway metrics**: `Session.GatewayMetrics()` and
+  `ShardManager.GatewayMetrics()` expose connection and resume counters,
+  identify scheduler wait time and budget rejections, and the latest
+  acknowledged heartbeat latency for each shard.
 - **`GuildBulkBan`**: ban up to 200 users in a single API call.
 - **Stickers, guild widget, soundboard**: full REST coverage of APIs
   that upstream defined endpoints for but never implemented methods for.
@@ -54,6 +58,8 @@ differences from upstream.
 - **Guild Welcome Screen and Vanity URL APIs**: `GuildWelcomeScreen` /
   `GuildWelcomeScreenEdit` and `GuildVanityURL` / `GuildVanityURLEdit`
   manage the community welcome screen and the custom invite code.
+  `GuildWelcomeScreenEnable` sets the welcome text and recommended channels
+  and enables the screen in one request.
 - **Partial onboarding edits**: `GuildOnboardingEditPartial` updates only
   the supplied onboarding fields (prompts, default channels, enabled flag)
   via `?partial=true` instead of rewriting the whole flow.

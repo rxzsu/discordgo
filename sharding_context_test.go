@@ -282,6 +282,243 @@ func TestShardIdentifySchedulerPacesBucketsAndRefreshesBudget(t *testing.T) {
 	})
 }
 
+func TestShardManagerResumesThenIdentifiesWithinBudget(t *testing.T) {
+	type attempt struct {
+		packet resumePacket
+		err    error
+	}
+	attempts := make(chan attempt, 8)
+	var connections atomic.Int32
+	gateway := scriptedShardGateway(t, func(ctx context.Context, c *websocket.Conn, url string) {
+		connection := connections.Add(1)
+		if err := wsjson.Write(ctx, c, map[string]any{"op": 10, "d": map[string]int{"heartbeat_interval": 3600000}}); err != nil {
+			return
+		}
+		var packet resumePacket
+		err := wsjson.Read(ctx, c, &packet)
+		attempts <- attempt{packet, err}
+		if err != nil {
+			return
+		}
+		switch connection {
+		case 1:
+			writeShardReady(ctx, c, url)
+			var heartbeat heartbeatOp
+			if err := wsjson.Read(ctx, c, &heartbeat); err != nil || heartbeat.Op != 1 {
+				return
+			}
+			time.Sleep(30 * time.Millisecond)
+			_ = wsjson.Write(ctx, c, map[string]any{"op": 11, "d": nil})
+			_ = wsjson.Write(ctx, c, map[string]any{"op": 7, "d": nil})
+		case 2:
+			_ = wsjson.Write(ctx, c, map[string]any{"op": 0, "t": "REPLAYED_EVENT", "s": 2, "d": map[string]any{}})
+			_ = wsjson.Write(ctx, c, map[string]any{"op": 0, "t": "RESUMED", "s": 3, "d": map[string]any{}})
+			_ = wsjson.Write(ctx, c, map[string]any{"op": 7, "d": nil})
+		case 3:
+			// Reject RESUME during the handshake, before a RESUMED event.
+			_ = wsjson.Write(ctx, c, map[string]any{"op": 9, "d": false})
+		case 4:
+			writeShardReady(ctx, c, url)
+			// A timed-out session must also be replaced without sending RESUME.
+			_ = c.Close(websocket.StatusCode(4009), "session timed out")
+			return
+		}
+		_, _, _ = c.Read(ctx)
+	})
+	m := testShardReconnectManager(gateway, 2)
+	m.Config.IdentifyDelay = 1500 * time.Millisecond
+	t.Cleanup(m.Close)
+	resumed := make(chan struct{})
+	m.AddHandlerOnce(func(*Session, *Resumed) { close(resumed) })
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	if err := m.OpenContext(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for index, want := range []int{2, 6, 6, 2, 0} {
+		select {
+		case got := <-attempts:
+			if want == 0 {
+				if got.err == nil {
+					t.Fatalf("sent opcode %d after exhausting the identify budget", got.packet.Op)
+				}
+				continue
+			}
+			if got.err != nil || got.packet.Op != want {
+				t.Fatalf("expected opcode %d, got %d (%v)", want, got.packet.Op, got.err)
+			}
+			if want == 6 && (got.packet.Data.SessionID != "scripted" || got.packet.Data.Sequence != int64(2*index-1)) {
+				t.Fatalf("unexpected RESUME state: %+v", got.packet.Data)
+			}
+		case <-ctx.Done():
+			t.Fatalf("waiting for opcode %d: %v", want, ctx.Err())
+		}
+	}
+	waitStartupStage(t, resumed)
+	metrics := m.GatewayMetrics()
+	if len(metrics) != 1 {
+		t.Fatalf("expected metrics for one shard, got %d", len(metrics))
+	}
+	snapshot := metrics[0]
+	if snapshot.ShardID != 0 || snapshot.ReconnectAttempts != 4 || snapshot.ReconnectSuccesses != 2 ||
+		snapshot.ResumeAttempts != 2 || snapshot.ResumeSuccesses != 1 || snapshot.IdentifyBudgetRejections != 1 {
+		t.Fatalf("unexpected gateway counters: %+v", snapshot)
+	}
+	if snapshot.HeartbeatLatency <= 0 || snapshot.IdentifyWait <= 0 {
+		t.Fatalf("expected heartbeat latency and identify wait: %+v", snapshot)
+	}
+}
+
+func TestShardManagerCloseCancelsReconnectHandshake(t *testing.T) {
+	reconnecting := make(chan struct{})
+	disconnected := make(chan struct{})
+	retried := make(chan struct{}, 1)
+	var connections atomic.Int32
+	gateway := scriptedShardGateway(t, func(ctx context.Context, c *websocket.Conn, url string) {
+		switch connections.Add(1) {
+		case 1:
+			_ = wsjson.Write(ctx, c, map[string]any{"op": 10, "d": map[string]int{"heartbeat_interval": 3600000}})
+			var packet resumePacket
+			if wsjson.Read(ctx, c, &packet) != nil {
+				return
+			}
+			writeShardReady(ctx, c, url)
+			_ = wsjson.Write(ctx, c, map[string]any{"op": 7, "d": nil})
+			_, _, _ = c.Read(ctx)
+		case 2:
+			close(reconnecting)
+			// Withhold HELLO so Close must cancel an in-flight handshake.
+			_, _, _ = c.Read(ctx)
+			close(disconnected)
+		default:
+			select {
+			case retried <- struct{}{}:
+			default:
+			}
+		}
+	})
+	m := testShardReconnectManager(gateway, 2)
+	t.Cleanup(m.Close)
+	if err := m.Open(); err != nil {
+		t.Fatal(err)
+	}
+	waitStartupStage(t, reconnecting)
+	closed := make(chan struct{})
+	go func() {
+		m.Close()
+		close(closed)
+	}()
+	waitStartupStage(t, closed)
+	waitStartupStage(t, disconnected)
+	if metrics := m.GatewayMetrics(); len(metrics) != 0 {
+		t.Fatalf("manager retained metrics for closed shards: %+v", metrics)
+	}
+	select {
+	case <-retried:
+		t.Fatal("reconnected after manager Close")
+	case <-time.After(1200 * time.Millisecond):
+	}
+}
+
+func TestInvalidGatewaySessionPreservesOnlyResumableState(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		payload string
+		wantErr bool
+		keep    bool
+	}{
+		{"resumable", "true", false, true},
+		{"non-resumable", "false", false, false},
+		{"malformed", `"false"`, true, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			s, err := New("Bot test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.sessionID = "session"
+			s.resumeGatewayURL = "wss://resume.example"
+			atomic.StoreInt64(s.sequence, 42)
+
+			s.Lock()
+			err = s.invalidateGatewaySessionLocked([]byte(test.payload))
+			s.Unlock()
+			if (err != nil) != test.wantErr {
+				t.Fatalf("unexpected invalid-session error: %v", err)
+			}
+			wantID, wantURL, wantSequence := "", "", int64(0)
+			if test.keep {
+				wantID, wantURL, wantSequence = "session", "wss://resume.example", 42
+			}
+			if s.sessionID != wantID || s.resumeGatewayURL != wantURL || atomic.LoadInt64(s.sequence) != wantSequence {
+				t.Fatalf("unexpected session state: id=%q url=%q sequence=%d", s.sessionID, s.resumeGatewayURL, atomic.LoadInt64(s.sequence))
+			}
+		})
+	}
+}
+
+func TestGatewayMetricsCountsResumedOncePerAttempt(t *testing.T) {
+	s, err := New("Bot test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet := []byte(`{"op":0,"t":"RESUMED","s":1,"d":{}}`)
+	if _, err := s.onEvent(int(websocket.MessageText), packet); err != nil {
+		t.Fatal(err)
+	}
+	if count := s.GatewayMetrics().ResumeSuccesses; count != 0 {
+		t.Fatalf("counted RESUMED without a pending attempt: %d", count)
+	}
+	s.gatewayMetrics.resumePending.Store(true)
+	for range 2 {
+		if _, err := s.onEvent(int(websocket.MessageText), packet); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if count := s.GatewayMetrics().ResumeSuccesses; count != 1 {
+		t.Fatalf("expected one success for the pending attempt, got %d", count)
+	}
+}
+
+func testShardReconnectManager(gateway string, remaining int) *ShardManager {
+	return NewShardManager(ShardingConfig{
+		Token: "Bot test", IdentifyDelay: time.Millisecond,
+		ConfigureSession: func(s *Session) {
+			s.gateway = gateway
+			s.Client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				body := fmt.Sprintf(`{"shards":1,"session_start_limit":{"max_concurrency":1,"total":100,"remaining":%d,"reset_after":3600000}}`, remaining)
+				return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}, nil
+			})}
+		},
+	})
+}
+
+func scriptedShardGateway(t *testing.T, script func(context.Context, *websocket.Conn, string)) string {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.CloseNow()
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		script(ctx, c, "ws://"+r.Host)
+	}))
+	t.Cleanup(server.Close)
+	return "ws" + strings.TrimPrefix(server.URL, "http")
+}
+
+func writeShardReady(ctx context.Context, c *websocket.Conn, url string) {
+	_ = wsjson.Write(ctx, c, map[string]any{
+		"op": 0, "t": "READY", "s": 1,
+		"d": map[string]any{
+			"user":   map[string]string{"id": "1", "username": "test"},
+			"guilds": []any{}, "session_id": "scripted", "resume_gateway_url": url,
+		},
+	})
+}
+
 func TestShardManagerFailureClosesEarlierShards(t *testing.T) {
 	gateway, _, _ := testGateway(t, "")
 	m := NewShardManager(ShardingConfig{

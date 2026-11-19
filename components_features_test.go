@@ -9,6 +9,66 @@ import (
 	"testing"
 )
 
+func TestComponentsV2InteractionResponseValidation(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		kind    InteractionResponseType
+		modify  func(*InteractionResponseData)
+		wantErr string
+	}{
+		{"direct reply", InteractionResponseChannelMessageWithSource, nil, ""},
+		{"message update", InteractionResponseUpdateMessage, nil, ""},
+		{"deferred", InteractionResponseDeferredChannelMessageWithSource, nil, "only support the ephemeral flag"},
+		{"autocomplete", InteractionApplicationCommandAutocompleteResult, nil, "unsupported for interaction response type"},
+		{"content", InteractionResponseChannelMessageWithSource, func(d *InteractionResponseData) { d.Content = "legacy" }, "cannot include"},
+		{"embeds", InteractionResponseUpdateMessage, func(d *InteractionResponseData) { d.Embeds = []*MessageEmbed{{Title: "legacy"}} }, "cannot include"},
+		{"tts", InteractionResponseChannelMessageWithSource, func(d *InteractionResponseData) { d.TTS = true }, "cannot include"},
+		{"poll", InteractionResponseChannelMessageWithSource, func(d *InteractionResponseData) { d.Poll = &Poll{} }, "cannot include"},
+		{"without components", InteractionResponseUpdateMessage, func(d *InteractionResponseData) { d.Components = nil }, "at least one component"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			data := &InteractionResponseData{
+				Components: []MessageComponent{NewTextDisplay("Hello")},
+				Flags:      MessageFlagsIsComponentsV2,
+			}
+			wantFlags := "32768"
+			if test.kind == InteractionResponseChannelMessageWithSource {
+				data.Flags |= MessageFlagsEphemeral
+				wantFlags = "32832"
+			}
+			if test.modify != nil {
+				test.modify(data)
+			}
+			body, err := Marshal(InteractionResponse{Type: test.kind, Data: data})
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("expected error containing %q, got %v", test.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var response struct {
+				Type InteractionResponseType
+				Data map[string]json.RawMessage
+			}
+			if err := json.Unmarshal(body, &response); err != nil {
+				t.Fatal(err)
+			}
+			if response.Type != test.kind || string(response.Data["flags"]) != wantFlags ||
+				!strings.Contains(string(response.Data["components"]), "Hello") {
+				t.Fatalf("invalid callback payload: %s", body)
+			}
+			for _, field := range []string{"content", "embeds", "tts", "poll"} {
+				if _, exists := response.Data[field]; exists {
+					t.Errorf("unexpected %q in %s", field, body)
+				}
+			}
+		})
+	}
+}
+
 func TestModalChoiceComponents(t *testing.T) {
 	modal := NewModal("survey", "Survey").
 		AddLabel(NewLabel("Plan").RadioGroup(NewRadioGroup("plan").Required(false).

@@ -4,6 +4,53 @@ All notable changes in this fork relative to upstream
 [bwmarrin/discordgo](https://github.com/bwmarrin/discordgo) are documented
 here.
 
+## v1.9.0
+
+### Added
+
+- `GuildWelcomeScreenEnable` configures and enables a community server's
+  welcome screen in one request.
+- Components V2 builders for text displays, sections, containers, and media
+  galleries. Modals support radio groups, checkbox groups, and single
+  checkboxes. Unknown component types preserve their original JSON.
+- The [Components V2 survey example](examples/components_v2) posts a message
+  with a button, opens a modal, and edits the deferred ephemeral response
+  with the selected option.
+- `MessageSend.Nonce` and `MessageSend.EnforceNonce` let callers opt in to
+  Discord's duplicate detection when retrying message creation.
+- `Session.GatewayMetrics()` and `ShardManager.GatewayMetrics()` report
+  reconnects, resume attempts and successes, identify scheduler wait time
+  and budget rejections, and the latest acknowledged heartbeat latency.
+
+### Changed
+
+- Automatic shard startup uses Discord's identify concurrency buckets and
+  checks the remaining session-start budget. Fresh identifies during
+  reconnect share the scheduler. An explicit `IdentifyDelay` keeps startup
+  sequential.
+- Bounded TTL caches use an expiry heap to select eviction victims. JSON
+  restores respect the configured capacity.
+- `HeartbeatLatency()` reports the latest acknowledged gateway heartbeat
+  round trip and returns zero before the first acknowledgement.
+
+### Fixed
+
+- Welcome-screen edits distinguish an omitted channel list from an empty
+  list and encode absent emoji fields as JSON null.
+- An invalid session received during a Gateway handshake no longer deadlocks
+  the session. A non-resumable session is discarded before attempting a new
+  identify.
+- Modal and deferred interaction callbacks omit legacy message fields.
+  Components V2 callbacks reject incompatible legacy payload fields.
+- Command sync distinguishes explicit zero default permissions from unset
+  permissions and applies display-label changes to command choices.
+- Token managers share concurrent OAuth2 refreshes and back off after
+  background refresh failures.
+- TTL-cache invalidation prevents an older in-flight load from overwriting
+  newer state. Eviction callbacks report the actual removal reason.
+- The `voice_receive` and `linked_roles` examples build against this fork
+  and are included in CI.
+
 ## v1.8.0
 
 Large feature release: a webhook-mode interaction server, application

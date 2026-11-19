@@ -597,6 +597,55 @@ type InteractionResponse struct {
 	Data *InteractionResponseData `json:"data,omitempty"`
 }
 
+// MarshalJSON keeps modal and Components V2 callbacks free of legacy message fields.
+func (r InteractionResponse) MarshalJSON() ([]byte, error) {
+	type response InteractionResponse
+	type callback struct {
+		Type InteractionResponseType `json:"type"`
+		Data any                     `json:"data"`
+	}
+	if r.Data == nil {
+		return Marshal(response(r))
+	}
+	if r.Type == InteractionResponseModal {
+		return Marshal(callback{
+			Type: r.Type,
+			Data: struct {
+				CustomID   string             `json:"custom_id"`
+				Title      string             `json:"title"`
+				Components []MessageComponent `json:"components"`
+			}{r.Data.CustomID, r.Data.Title, r.Data.Components},
+		})
+	}
+	if r.Type == InteractionResponseDeferredChannelMessageWithSource {
+		if r.Data.Flags&^MessageFlagsEphemeral != 0 {
+			return nil, fmt.Errorf("deferred interaction responses only support the ephemeral flag")
+		}
+		return Marshal(callback{Type: r.Type, Data: struct {
+			Flags MessageFlags `json:"flags,omitempty"`
+		}{Flags: r.Data.Flags}})
+	}
+	if r.Data.Flags&MessageFlagsIsComponentsV2 == 0 {
+		return Marshal(response(r))
+	}
+	if r.Type != InteractionResponseChannelMessageWithSource && r.Type != InteractionResponseUpdateMessage {
+		return nil, fmt.Errorf("Components V2 is unsupported for interaction response type %d", r.Type)
+	}
+	if r.Data.Content != "" || len(r.Data.Embeds) > 0 || r.Data.Poll != nil || r.Data.TTS {
+		return nil, fmt.Errorf("Components V2 interaction responses cannot include content, embeds, a poll, or TTS")
+	}
+	if len(r.Data.Components) == 0 {
+		return nil, fmt.Errorf("Components V2 interaction responses require at least one component")
+	}
+	type responseData InteractionResponseData
+	return Marshal(callback{Type: r.Type, Data: struct {
+		responseData
+		Content string          `json:"content,omitempty"`
+		Embeds  []*MessageEmbed `json:"embeds,omitempty"`
+		TTS     bool            `json:"tts,omitempty"`
+	}{responseData: responseData(*r.Data)}})
+}
+
 // InteractionResponseData is response data for an interaction.
 type InteractionResponseData struct {
 	TTS             bool                    `json:"tts"`
@@ -608,7 +657,8 @@ type InteractionResponseData struct {
 	Attachments     *[]*MessageAttachment   `json:"attachments,omitempty"`
 	Poll            *Poll                   `json:"poll,omitempty"`
 
-	// NOTE: only MessageFlagsSuppressEmbeds and MessageFlagsEphemeral can be set.
+	// Flags supported by Discord depend on the response type. To send
+	// Components V2 after deferring, set the flag when editing the response.
 	Flags MessageFlags `json:"flags,omitempty"`
 
 	// NOTE: autocomplete interaction only.

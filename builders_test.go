@@ -214,9 +214,9 @@ func TestModalBuilderJSON(t *testing.T) {
 				MaxLength(200))).
 		Build()
 
-	want := `{"type":9,"data":{"tts":false,"content":"","components":[` +
+	want := `{"type":9,"data":{"custom_id":"feedback","title":"Send feedback","components":[` +
 		`{"label":"Your feedback","description":"What can we improve?","component":{"custom_id":"feedback_text","style":2,"placeholder":"Type here...","required":true,"min_length":1,"max_length":200,"type":4},"type":18}` +
-		`],"embeds":null,"custom_id":"feedback","title":"Send feedback"}}`
+		`]}}`
 
 	got := marshalForWire(t, resp)
 	if got != want {

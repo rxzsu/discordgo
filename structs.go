@@ -53,6 +53,7 @@ type Session struct {
 	// https://discord.com/developers/docs/topics/gateway#identify
 	Identify          Identify
 	identifyScheduler *shardIdentifyScheduler
+	gatewayMetrics    gatewayMetrics
 
 	// TODO: Remove Below, Deprecated, Use Identify struct
 	// Should the session request compressed websocket data.
@@ -123,6 +124,7 @@ type Session struct {
 
 	// Stores the last Heartbeat sent (in UTC)
 	LastHeartbeatSent time.Time
+	heartbeatSentAt   time.Time // Monotonic clock for measuring the round trip.
 
 	// used to deal with rate limits
 	Ratelimiter *RateLimiter

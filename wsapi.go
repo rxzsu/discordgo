@@ -245,7 +245,7 @@ func (s *Session) OpenContext(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	e, err := s.onEvent(int(mt), m)
+	e, err := s.onGatewayEvent(int(mt), m, true)
 	if err != nil {
 		return err
 	}
@@ -255,6 +255,9 @@ func (s *Session) OpenContext(ctx context.Context) error {
 	}
 	s.log(LogInformational, "Op 10 Hello Packet received from Discord")
 	s.LastHeartbeatAck = time.Now().UTC()
+	s.LastHeartbeatSent = time.Time{}
+	s.heartbeatSentAt = time.Time{}
+	s.gatewayMetrics.resumePending.Store(false)
 	var h helloOp
 	if err = json.Unmarshal(e.RawData, &h); err != nil {
 		err = fmt.Errorf("error unmarshalling helloOp, %s", err)
@@ -263,7 +266,8 @@ func (s *Session) OpenContext(ctx context.Context) error {
 
 	// Now we send either an Op 2 Identity if this is a brand new
 	// connection or Op 6 Resume if we are resuming an existing connection.
-	if s.sessionID == "" && sequence == 0 {
+	resuming := s.sessionID != "" && sequence != 0
+	if !resuming {
 
 		// Send Op 2 Identity Packet
 		err = s.identifyContext(ctx)
@@ -282,6 +286,8 @@ func (s *Session) OpenContext(ctx context.Context) error {
 		p.Data.Sequence = sequence
 
 		s.log(LogInformational, "sending resume packet to gateway")
+		s.gatewayMetrics.resumeAttempts.Add(1)
+		s.gatewayMetrics.resumePending.Store(true)
 		s.wsMutex.Lock()
 		err = wsjson.Write(ctx, s.wsConn, p)
 		s.wsMutex.Unlock()
@@ -311,9 +317,12 @@ func (s *Session) OpenContext(ctx context.Context) error {
 	mt, m, err = s.wsConn.Read(handshakeCtx2)
 	cancelHandshake2()
 	if err != nil {
+		if gatewayCloseRequiresIdentify(err) {
+			s.resetGatewaySessionLocked()
+		}
 		return err
 	}
-	e, err = s.onEvent(int(mt), m)
+	e, err = s.onGatewayEvent(int(mt), m, true)
 	if err != nil {
 		return err
 	}
@@ -322,14 +331,21 @@ func (s *Session) OpenContext(ctx context.Context) error {
 	// Handling them inline here would deadlock the session forever.
 	// Tear the connection down and let the reconnect loop retry.
 	if e.Operation == 7 || e.Operation == 9 {
-		s.log(LogInformational, "received op %d during handshake, closing for reconnect", e.Operation)
-		_ = s.wsConn.CloseNow()
-		s.wsConn = nil
-		return ErrWSNotReady
+		if e.Operation == 9 {
+			if err = s.invalidateGatewaySessionLocked(e.RawData); err != nil {
+				return err
+			}
+		}
+		err = ErrWSNotReady
+		return err
 	}
-	if e.Type != `READY` && e.Type != `RESUMED` {
-		// This is not fatal, but it does not follow their API documentation.
-		s.log(LogWarning, "Expected READY/RESUMED, instead got:\n%#v\n", e)
+	if e.Operation != 0 {
+		err = fmt.Errorf("expected Gateway dispatch during handshake, got op %d", e.Operation)
+		return err
+	}
+	// On RESUME, Discord can replay missed dispatches before RESUMED.
+	if !resuming && e.Type != "READY" {
+		s.log(LogWarning, "Expected READY, instead got:\n%#v\n", e)
 	}
 	s.log(LogInformational, "First Packet:\n%#v\n", e)
 
@@ -377,13 +393,17 @@ func (s *Session) listen(wsConn *websocket.Conn, listening <-chan interface{}) {
 			// Detect if we have been closed manually. If a Close() has already
 			// happened, the websocket we are listening on will be different to
 			// the current session.
-			s.RLock()
+			s.Lock()
 			sameConnection := s.wsConn == wsConn
-			s.RUnlock()
+			if sameConnection && gatewayCloseRequiresIdentify(err) {
+				s.resetGatewaySessionLocked()
+			}
+			gateway := s.gateway
+			s.Unlock()
 
 			if sameConnection {
 
-				s.log(LogWarning, "error reading from gateway %s websocket, %s", s.gateway, err)
+				s.log(LogWarning, "error reading from gateway %s websocket, %s", gateway, err)
 				// There has been an error reading, close the websocket so that
 				// OnDisconnect event is emitted.
 				err := s.Close()
@@ -428,11 +448,24 @@ type helloOp struct {
 // time.Millisecond here is intentional, not a bug.
 const FailedHeartbeatAcks time.Duration = 5 * time.Millisecond
 
-// HeartbeatLatency returns the latency between heartbeat acknowledgement and heartbeat send.
+// HeartbeatLatency returns the latest acknowledged gateway heartbeat latency.
+// It returns zero before the first acknowledgement.
 func (s *Session) HeartbeatLatency() time.Duration {
+	return time.Duration(s.gatewayMetrics.heartbeatLatency.Load())
+}
 
-	return s.LastHeartbeatAck.Sub(s.LastHeartbeatSent)
-
+func (s *Session) sendGatewayHeartbeat(wsConn *websocket.Conn) error {
+	s.Lock()
+	if s.wsConn != wsConn {
+		s.Unlock()
+		return ErrWSNotReady
+	}
+	s.wsMutex.Lock()
+	s.heartbeatSentAt = time.Now()
+	s.LastHeartbeatSent = s.heartbeatSentAt.UTC()
+	s.Unlock()
+	defer s.wsMutex.Unlock()
+	return wsjson.Write(context.Background(), wsConn, heartbeatOp{1, atomic.LoadInt64(s.sequence)})
 }
 
 // heartbeat sends regular heartbeats to Discord so it knows the client
@@ -458,13 +491,10 @@ func (s *Session) heartbeat(wsConn *websocket.Conn, listening <-chan interface{}
 		}
 		s.RLock()
 		last := s.LastHeartbeatAck
+		gateway := s.gateway
 		s.RUnlock()
-		sequence := atomic.LoadInt64(s.sequence)
-		s.log(LogDebug, "sending gateway websocket heartbeat seq %d", sequence)
-		s.wsMutex.Lock()
-		s.LastHeartbeatSent = time.Now().UTC()
-		err = wsjson.Write(context.Background(), wsConn, heartbeatOp{1, sequence})
-		s.wsMutex.Unlock()
+		s.log(LogDebug, "sending gateway websocket heartbeat")
+		err = s.sendGatewayHeartbeat(wsConn)
 		if err != nil || time.Since(last) > (heartbeatInterval*FailedHeartbeatAcks) {
 			// A heartbeat may have been scheduled just before Close. Never
 			// let that old connection resurrect a deliberately closed session.
@@ -474,7 +504,7 @@ func (s *Session) heartbeat(wsConn *websocket.Conn, listening <-chan interface{}
 			default:
 			}
 			if err != nil {
-				s.log(LogError, "error sending heartbeat to gateway %s, %s", s.gateway, err)
+				s.log(LogError, "error sending heartbeat to gateway %s, %s", gateway, err)
 			} else {
 				s.log(LogError, "haven't gotten a heartbeat ACK in %v, triggering a reconnection", time.Now().UTC().Sub(last))
 			}
@@ -1074,6 +1104,10 @@ func parseGatewayEnvelope(payload []byte) (ge gatewayEnvelope, ok bool) {
 }
 
 func (s *Session) onEvent(messageType int, message []byte) (*Event, error) {
+	return s.onGatewayEvent(messageType, message, false)
+}
+
+func (s *Session) onGatewayEvent(messageType int, message []byte, handshaking bool) (*Event, error) {
 
 	var (
 		payload []byte
@@ -1137,9 +1171,18 @@ func (s *Session) onEvent(messageType int, message []byte) (*Event, error) {
 		s.log(LogError, "error decoding websocket message, %s", err)
 		return e, err
 	}
+	if e == nil {
+		return nil, ErrJSONUnmarshal
+	}
 
 	if s.LogLevel >= LogDebug {
 		s.log(LogDebug, "Op: %d, Seq: %d, Type: %s, Data: %s\n\n", e.Operation, e.Sequence, e.Type, string(e.RawData))
+	}
+
+	// Open holds the session mutex. Leave control packets to the
+	// handshake caller instead of running handlers that acquire it.
+	if handshaking && e.Operation != 0 && e.Operation != 10 {
+		return e, nil
 	}
 
 	// Ping request.
@@ -1152,9 +1195,7 @@ func (s *Session) onEvent(messageType int, message []byte) (*Event, error) {
 		if wsConn == nil {
 			return e, nil
 		}
-		s.wsMutex.Lock()
-		err = wsjson.Write(context.Background(), wsConn, heartbeatOp{1, atomic.LoadInt64(s.sequence)})
-		s.wsMutex.Unlock()
+		err = s.sendGatewayHeartbeat(wsConn)
 		if err != nil {
 			s.log(LogError, "error sending heartbeat in response to Op1")
 			return e, err
@@ -1176,19 +1217,13 @@ func (s *Session) onEvent(messageType int, message []byte) (*Event, error) {
 	// Must respond with a Identify packet.
 	if e.Operation == 9 {
 		s.log(LogInformational, "Closing and reconnecting in response to Op9")
+		s.Lock()
+		err := s.invalidateGatewaySessionLocked(e.RawData)
+		s.Unlock()
 		_ = s.CloseWithCode(int(websocket.StatusServiceRestart))
-
-		var resumable bool
-		if err := json.Unmarshal(e.RawData, &resumable); err != nil {
+		if err != nil {
 			s.log(LogError, "error unmarshalling invalid session event, %s", err)
 			return e, err
-		}
-
-		if !resumable {
-			s.log(LogInformational, "Gateway session is not resumable, discarding its information")
-			s.resumeGatewayURL = ""
-			s.sessionID = ""
-			atomic.StoreInt64(s.sequence, 0)
 		}
 
 		s.reconnect()
@@ -1202,7 +1237,11 @@ func (s *Session) onEvent(messageType int, message []byte) (*Event, error) {
 
 	if e.Operation == 11 {
 		s.Lock()
-		s.LastHeartbeatAck = time.Now().UTC()
+		now := time.Now()
+		s.LastHeartbeatAck = now.UTC()
+		if !s.heartbeatSentAt.IsZero() {
+			s.gatewayMetrics.heartbeatLatency.Store(int64(now.Sub(s.heartbeatSentAt)))
+		}
 		s.Unlock()
 		s.log(LogDebug, "got heartbeat ACK")
 		return e, nil
@@ -1220,6 +1259,9 @@ func (s *Session) onEvent(messageType int, message []byte) (*Event, error) {
 
 	// Store the message sequence
 	atomic.StoreInt64(s.sequence, e.Sequence)
+	if e.Type == "RESUMED" && s.gatewayMetrics.resumePending.Swap(false) {
+		s.gatewayMetrics.resumeSuccesses.Add(1)
+	}
 
 	// Map event to registered event handlers and pass it along to any registered handlers.
 	if eh, ok := registeredInterfaceProviders[e.Type]; ok {
@@ -1256,6 +1298,32 @@ func (s *Session) onEvent(messageType int, message []byte) (*Event, error) {
 	}
 
 	return e, nil
+}
+
+func (s *Session) invalidateGatewaySessionLocked(data json.RawMessage) error {
+	var resumable bool
+	if err := json.Unmarshal(data, &resumable); err != nil {
+		return err
+	}
+	if !resumable {
+		s.resetGatewaySessionLocked()
+	}
+	return nil
+}
+
+func (s *Session) resetGatewaySessionLocked() {
+	s.resumeGatewayURL = ""
+	s.sessionID = ""
+	atomic.StoreInt64(s.sequence, 0)
+}
+
+func gatewayCloseRequiresIdentify(err error) bool {
+	switch websocket.CloseStatus(err) {
+	case 4007, 4009: // Invalid sequence, session timed out.
+		return true
+	default:
+		return false
+	}
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1459,7 +1527,20 @@ func (s *Session) identifyContext(ctx context.Context) error {
 		return wsjson.Write(ctx, s.wsConn, op)
 	}
 	if s.identifyScheduler != nil {
-		return s.identifyScheduler.write(ctx, s.ShardID, send)
+		start := time.Now()
+		waiting := true
+		err := s.identifyScheduler.write(ctx, s.ShardID, func(ctx context.Context) error {
+			s.gatewayMetrics.identifyWait.Add(int64(time.Since(start)))
+			waiting = false
+			return send(ctx)
+		})
+		if waiting {
+			s.gatewayMetrics.identifyWait.Add(int64(time.Since(start)))
+		}
+		if errors.Is(err, ErrGatewayIdentifyBudget) {
+			s.gatewayMetrics.identifyBudgetRejections.Add(1)
+		}
+		return err
 	}
 	return send(ctx)
 }
@@ -1484,8 +1565,10 @@ func (s *Session) reconnect() {
 			}
 			s.log(LogInformational, "trying to reconnect to gateway")
 
+			s.gatewayMetrics.reconnectAttempts.Add(1)
 			err = s.OpenContext(ctx)
 			if err == nil {
+				s.gatewayMetrics.reconnectSuccesses.Add(1)
 				s.log(LogInformational, "successfully reconnected to gateway")
 
 				// I'm not sure if this is actually needed.
