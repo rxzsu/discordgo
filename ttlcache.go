@@ -15,6 +15,7 @@
 package discordgo
 
 import (
+	"container/heap"
 	"context"
 	"encoding/json"
 	"errors"
@@ -106,9 +107,40 @@ const (
 )
 
 // ttlCacheEntry is one cached value with its deadline.
-type ttlCacheEntry[V any] struct {
+type ttlCacheEntry[K comparable, V any] struct {
+	key       K
+	index     int
 	value     V
 	expiresAt time.Time
+}
+
+// ttlCacheExpiryHeap indexes bounded caches by expiration time.
+type ttlCacheExpiryHeap[K comparable, V any] []*ttlCacheEntry[K, V]
+
+func (h ttlCacheExpiryHeap[K, V]) Len() int { return len(h) }
+
+func (h ttlCacheExpiryHeap[K, V]) Less(i, j int) bool {
+	return h[i].expiresAt.Before(h[j].expiresAt)
+}
+
+func (h ttlCacheExpiryHeap[K, V]) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+	h[i].index = i
+	h[j].index = j
+}
+
+func (h *ttlCacheExpiryHeap[K, V]) Push(value any) {
+	entry := value.(*ttlCacheEntry[K, V])
+	entry.index = len(*h)
+	*h = append(*h, entry)
+}
+
+func (h *ttlCacheExpiryHeap[K, V]) Pop() any {
+	last := len(*h) - 1
+	entry := (*h)[last]
+	(*h)[last] = nil
+	*h = (*h)[:last]
+	return entry
 }
 
 // inflightCall tracks a running GetOrLoad loader so concurrent callers
@@ -123,8 +155,9 @@ type inflightCall[V any] struct {
 // for concurrent use.
 type TTLCache[K comparable, V any] struct {
 	mu       sync.Mutex
-	entries  map[K]*ttlCacheEntry[V]
+	entries  map[K]*ttlCacheEntry[K, V]
 	inflight map[K]*inflightCall[V]
+	expiry   ttlCacheExpiryHeap[K, V]
 
 	ttl             time.Duration
 	jitter          time.Duration
@@ -150,7 +183,7 @@ type TTLCache[K comparable, V any] struct {
 // the cache is no longer needed to stop the janitor.
 func NewTTLCache[K comparable, V any](opts TTLCacheOptions[K, V]) *TTLCache[K, V] {
 	c := &TTLCache[K, V]{
-		entries:  make(map[K]*ttlCacheEntry[V]),
+		entries:  make(map[K]*ttlCacheEntry[K, V]),
 		inflight: make(map[K]*inflightCall[V]),
 	}
 	c.ttl = opts.TTL
@@ -193,25 +226,30 @@ func NewTTLCache[K comparable, V any](opts TTLCacheOptions[K, V]) *TTLCache[K, V
 // expired entry is reclaimed and reported as a miss.
 func (c *TTLCache[K, V]) Get(key K) (V, bool) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.getLocked(key)
+	entry, expired := c.lookupLocked(key)
+	c.mu.Unlock()
+	if expired != nil {
+		c.notifyEvict(key, expired.value, TTLCacheEvictExpired)
+	}
+	if entry == nil {
+		var zero V
+		return zero, false
+	}
+	return entry.value, true
 }
 
-// getLocked is Get assuming the cache lock is held.
-func (c *TTLCache[K, V]) getLocked(key K) (V, bool) {
-	var zero V
-	e, ok := c.entries[key]
-	if !ok {
-		c.misses++
-		return zero, false
+// lookupLocked records the outcome and returns a live or reclaimed entry.
+func (c *TTLCache[K, V]) lookupLocked(key K) (live, expired *ttlCacheEntry[K, V]) {
+	entry := c.entries[key]
+	if entry != nil && !c.now().After(entry.expiresAt) {
+		c.hits++
+		return entry, nil
 	}
-	if c.now().After(e.expiresAt) {
-		c.removeLocked(key, TTLCacheEvictExpired)
-		c.misses++
-		return zero, false
+	c.misses++
+	if entry != nil {
+		c.removeLocked(entry, TTLCacheEvictExpired)
 	}
-	c.hits++
-	return e.value, true
+	return nil, entry
 }
 
 // Set stores value under key with the default TTL, replacing any
@@ -229,50 +267,73 @@ func (c *TTLCache[K, V]) SetWithTTL(key K, value V, ttl time.Duration) {
 	expiresAt := c.now().Add(ttl - c.jitterFor(ttl))
 
 	c.mu.Lock()
-	old, hadOld := c.entries[key]
-	c.entries[key] = &ttlCacheEntry[V]{value: value, expiresAt: expiresAt}
-	victims := c.enforceMaxLocked(key)
+	delete(c.inflight, key)
+	evicted := c.storeLocked(key, value, expiresAt)
 	c.mu.Unlock()
-
-	if hadOld && c.now().Before(old.expiresAt) {
-		c.notifyEvict(key, old.value, TTLCacheEvictOverwritten)
-	}
-	for _, v := range victims {
-		c.notifyEvict(v.key, v.value, TTLCacheEvictCapacity)
-	}
+	c.notifyRemoval(evicted)
 }
 
-// Delete removes key and reports whether a live entry was removed.
+// Delete removes key and detaches any running load. It reports whether
+// a live entry was removed.
 func (c *TTLCache[K, V]) Delete(key K) bool {
 	c.mu.Lock()
-	e, ok := c.entries[key]
-	if !ok {
+	delete(c.inflight, key)
+	entry := c.entries[key]
+	if entry == nil {
 		c.mu.Unlock()
 		return false
 	}
-	expired := c.now().After(e.expiresAt)
-	c.removeLocked(key, TTLCacheEvictDeleted)
-	c.mu.Unlock()
-
-	if !expired {
-		c.notifyEvict(key, e.value, TTLCacheEvictDeleted)
+	reason := TTLCacheEvictDeleted
+	if c.now().After(entry.expiresAt) {
+		reason = TTLCacheEvictExpired
 	}
-	return true
+	evicted := c.removeLocked(entry, reason)
+	c.mu.Unlock()
+	c.notifyRemoval(evicted)
+	return reason == TTLCacheEvictDeleted
 }
 
-// Clear removes all entries.
+// deleteMatching atomically removes entries and detaches loads matching a key.
+func (c *TTLCache[K, V]) deleteMatching(match func(K) bool) {
+	c.mu.Lock()
+	for key := range c.inflight {
+		if match(key) {
+			delete(c.inflight, key)
+		}
+	}
+	now := c.now()
+	var removed []ttlCacheEvicted[K, V]
+	for key, entry := range c.entries {
+		if !match(key) {
+			continue
+		}
+		reason := TTLCacheEvictDeleted
+		if now.After(entry.expiresAt) {
+			reason = TTLCacheEvictExpired
+		}
+		evicted := c.removeLocked(entry, reason)
+		if c.onEvict != nil {
+			removed = append(removed, evicted)
+		}
+	}
+	c.mu.Unlock()
+	for _, evicted := range removed {
+		c.notifyRemoval(evicted)
+	}
+}
+
+// Clear removes all entries and detaches all running loads.
 func (c *TTLCache[K, V]) Clear() {
 	c.mu.Lock()
-	all := make(map[K]V, len(c.entries))
-	for k, e := range c.entries {
-		all[k] = e.value
-	}
-	c.entries = make(map[K]*ttlCacheEntry[V])
+	all := c.entries
+	c.entries = make(map[K]*ttlCacheEntry[K, V])
+	c.expiry = nil
+	clear(c.inflight)
 	c.evictions += int64(len(all))
 	c.mu.Unlock()
 
-	for k, v := range all {
-		c.notifyEvict(k, v, TTLCacheEvictCleared)
+	for k, entry := range all {
+		c.notifyEvict(k, entry.value, TTLCacheEvictCleared)
 	}
 }
 
@@ -335,7 +396,8 @@ func (c *TTLCache[K, V]) Close() {
 // Concurrent GetOrLoad calls for the same key share one loader execution
 // (singleflight semantics): the first caller runs the loader, everyone
 // else waits and receives the same value or error. Load errors are not
-// cached.
+// cached. An explicit write or invalidation detaches an active load.
+// Its original callers still receive its result.
 func (c *TTLCache[K, V]) GetOrLoad(ctx context.Context, key K, load func(ctx context.Context, key K) (V, error)) (V, error) {
 	return c.GetOrLoadWithTTL(ctx, key, 0, load)
 }
@@ -344,21 +406,25 @@ func (c *TTLCache[K, V]) GetOrLoad(ctx context.Context, key K, load func(ctx con
 // value; zero falls back to the cache default.
 func (c *TTLCache[K, V]) GetOrLoadWithTTL(ctx context.Context, key K, ttl time.Duration, load func(ctx context.Context, key K) (V, error)) (V, error) {
 	c.mu.Lock()
-	if e, ok := c.entries[key]; ok && !c.now().After(e.expiresAt) {
-		c.hits++
-		v := e.value
+	entry, expired := c.lookupLocked(key)
+	if entry != nil {
 		c.mu.Unlock()
-		return v, nil
+		return entry.value, nil
 	}
-	if _, ok := c.entries[key]; ok {
-		// Expired: reclaim before loading.
-		c.removeLocked(key, TTLCacheEvictExpired)
-	} else {
-		c.misses++
-	}
-	if call, ok := c.inflight[key]; ok {
+	call, waiting := c.inflight[key]
+	if waiting {
 		c.waiters++
-		c.mu.Unlock()
+	} else {
+		call = &inflightCall[V]{done: make(chan struct{})}
+		c.inflight[key] = call
+		c.loads++
+	}
+	c.mu.Unlock()
+
+	if expired != nil {
+		c.notifyEvict(key, expired.value, TTLCacheEvictExpired)
+	}
+	if waiting {
 		select {
 		case <-call.done:
 			return call.val, call.err
@@ -367,10 +433,6 @@ func (c *TTLCache[K, V]) GetOrLoadWithTTL(ctx context.Context, key K, ttl time.D
 			return zero, ctx.Err()
 		}
 	}
-	call := &inflightCall[V]{done: make(chan struct{})}
-	c.inflight[key] = call
-	c.loads++
-	c.mu.Unlock()
 
 	c.runLoader(ctx, key, ttl, load, call)
 	// This goroutine ran the loader itself, so the result is final.
@@ -395,31 +457,26 @@ func (c *TTLCache[K, V]) runLoader(ctx context.Context, key K, ttl time.Duration
 		val, err = load(ctx, key)
 	}()
 
+	if ttl <= 0 {
+		ttl = c.ttl
+	}
 	c.mu.Lock()
-	var victims []ttlCacheEvicted[K, V]
-	if err == nil {
-		if ttl <= 0 {
-			ttl = c.ttl
+	var evicted ttlCacheEvicted[K, V]
+	if c.inflight[key] == call {
+		delete(c.inflight, key)
+		if err == nil {
+			expiresAt := c.now().Add(ttl - c.jitterFor(ttl))
+			evicted = c.storeLocked(key, val, expiresAt)
 		}
-		expiresAt := c.now().Add(ttl - c.jitterFor(ttl))
-		old, hadOld := c.entries[key]
-		c.entries[key] = &ttlCacheEntry[V]{value: val, expiresAt: expiresAt}
-		victims = c.enforceMaxLocked(key)
-		if hadOld && c.now().Before(old.expiresAt) {
-			victims = append(victims, ttlCacheEvicted[K, V]{key: key, value: old.value, reason: TTLCacheEvictOverwritten})
-		}
-	} else {
+	}
+	if err != nil {
 		c.loadErrors++
 	}
 	call.val = val
 	call.err = err
-	delete(c.inflight, key)
 	close(call.done)
 	c.mu.Unlock()
-
-	for _, v := range victims {
-		c.notifyEvict(v.key, v.value, v.reason)
-	}
+	c.notifyRemoval(evicted)
 }
 
 // ErrTTLCacheLoaderPanicked is wrapped into the error returned by
@@ -474,78 +531,59 @@ func (c *TTLCache[K, V]) jitterFor(ttl time.Duration) time.Duration {
 	return time.Duration(rand.Int64N(int64(c.jitter)))
 }
 
-// ttlCacheEvicted records an entry removed by enforceMaxLocked or an
-// overwrite so its OnEvict hook can run outside the cache lock.
+// ttlCacheEvicted carries a removal to the hook after unlocking.
 type ttlCacheEvicted[K comparable, V any] struct {
-	key    K
-	value  V
+	entry  *ttlCacheEntry[K, V]
 	reason TTLCacheEvictReason
 }
 
-// enforceMaxLocked evicts entries when the cache is over MaxEntries.
-// justStored is never evicted for capacity. Returns the evicted entries
-// (values included) so callers can run OnEvict hooks after unlocking.
-// Callers must hold the lock.
-func (c *TTLCache[K, V]) enforceMaxLocked(justStored K) []ttlCacheEvicted[K, V] {
-	if c.maxEntries <= 0 || len(c.entries) <= c.maxEntries {
-		return nil
+// storeLocked makes room before inserting so the new value is never
+// selected as its own eviction victim.
+func (c *TTLCache[K, V]) storeLocked(key K, value V, expiresAt time.Time) ttlCacheEvicted[K, V] {
+	var evicted ttlCacheEvicted[K, V]
+	if old := c.entries[key]; old != nil {
+		reason := TTLCacheEvictOverwritten
+		if c.now().After(old.expiresAt) {
+			reason = TTLCacheEvictExpired
+		}
+		evicted = c.removeLocked(old, reason)
+	} else if c.maxEntries > 0 && len(c.entries) == c.maxEntries {
+		evicted = c.removeEarliestLocked(c.now())
 	}
-	now := c.now()
-	// Reclaim expired entries first: free and accurate.
-	var evicted []ttlCacheEvicted[K, V]
-	for k, e := range c.entries {
-		if k == justStored {
-			continue
-		}
-		if now.After(e.expiresAt) {
-			delete(c.entries, k)
-			c.expired++
-			if e != nil {
-				evicted = append(evicted, ttlCacheEvicted[K, V]{key: k, value: e.value, reason: TTLCacheEvictExpired})
-			}
-			if len(c.entries) <= c.maxEntries {
-				return evicted
-			}
-		}
-	}
-	// Still over: evict the live entry closest to expiry.
-	for len(c.entries) > c.maxEntries {
-		var (
-			victim    K
-			victimExp time.Time
-			victimVal V
-			found     bool
-		)
-		for k, e := range c.entries {
-			if k == justStored {
-				continue
-			}
-			if !found || e.expiresAt.Before(victimExp) {
-				victim, victimExp, victimVal, found = k, e.expiresAt, e.value, true
-			}
-		}
-		if !found {
-			break
-		}
-		delete(c.entries, victim)
-		c.evictions++
-		evicted = append(evicted, ttlCacheEvicted[K, V]{key: victim, value: victimVal, reason: TTLCacheEvictCapacity})
+	entry := &ttlCacheEntry[K, V]{key: key, value: value, expiresAt: expiresAt}
+	c.entries[key] = entry
+	if c.maxEntries > 0 {
+		heap.Push(&c.expiry, entry)
 	}
 	return evicted
 }
 
-// removeLocked deletes an entry, updating counters. Callers must hold the
-// lock.
-func (c *TTLCache[K, V]) removeLocked(key K, reason TTLCacheEvictReason) {
-	if _, ok := c.entries[key]; !ok {
-		return
+func (c *TTLCache[K, V]) removeEarliestLocked(now time.Time) ttlCacheEvicted[K, V] {
+	entry := c.expiry[0]
+	reason := TTLCacheEvictCapacity
+	if now.After(entry.expiresAt) {
+		reason = TTLCacheEvictExpired
 	}
-	delete(c.entries, key)
+	return c.removeLocked(entry, reason)
+}
+
+func (c *TTLCache[K, V]) removeLocked(entry *ttlCacheEntry[K, V], reason TTLCacheEvictReason) ttlCacheEvicted[K, V] {
+	delete(c.entries, entry.key)
+	if c.maxEntries > 0 {
+		heap.Remove(&c.expiry, entry.index)
+	}
 	switch reason {
 	case TTLCacheEvictExpired:
 		c.expired++
-	default:
+	case TTLCacheEvictCapacity, TTLCacheEvictDeleted:
 		c.evictions++
+	}
+	return ttlCacheEvicted[K, V]{entry: entry, reason: reason}
+}
+
+func (c *TTLCache[K, V]) notifyRemoval(evicted ttlCacheEvicted[K, V]) {
+	if entry := evicted.entry; entry != nil {
+		c.notifyEvict(entry.key, entry.value, evicted.reason)
 	}
 }
 
@@ -578,31 +616,28 @@ func (c *TTLCache[K, V]) janitor() {
 func (c *TTLCache[K, V]) removeExpired() {
 	c.mu.Lock()
 	now := c.now()
-	var dead []K
-	for k, e := range c.entries {
-		if now.After(e.expiresAt) {
-			dead = append(dead, k)
+	var removed []ttlCacheEvicted[K, V]
+	if c.maxEntries > 0 {
+		for len(c.expiry) > 0 && now.After(c.expiry[0].expiresAt) {
+			evicted := c.removeLocked(c.expiry[0], TTLCacheEvictExpired)
+			if c.onEvict != nil {
+				removed = append(removed, evicted)
+			}
 		}
-	}
-	removed := make([]struct {
-		k K
-		v V
-	}, 0, len(dead))
-	for _, k := range dead {
-		e := c.entries[k]
-		delete(c.entries, k)
-		c.expired++
-		if e != nil {
-			removed = append(removed, struct {
-				k K
-				v V
-			}{k, e.value})
+	} else {
+		for _, entry := range c.entries {
+			if now.After(entry.expiresAt) {
+				evicted := c.removeLocked(entry, TTLCacheEvictExpired)
+				if c.onEvict != nil {
+					removed = append(removed, evicted)
+				}
+			}
 		}
 	}
 	c.mu.Unlock()
 
-	for _, r := range removed {
-		c.notifyEvict(r.k, r.v, TTLCacheEvictExpired)
+	for _, evicted := range removed {
+		c.notifyRemoval(evicted)
 	}
 }
 
@@ -637,7 +672,8 @@ func (c *TTLCache[K, V]) SaveJSON() ([]byte, error) {
 
 // LoadJSON replaces the cache contents with the serialized entries. All
 // existing entries are dropped first; entries that already expired at
-// load time are skipped. Counters are not restored.
+// load time are skipped, then MaxEntries retains those with the latest
+// expiry times. Counters are not restored.
 func (c *TTLCache[K, V]) LoadJSON(data []byte) error {
 	var in []ttlCacheJSONEntry[K, V]
 	if err := json.Unmarshal(data, &in); err != nil {
@@ -646,16 +682,47 @@ func (c *TTLCache[K, V]) LoadJSON(data []byte) error {
 
 	c.mu.Lock()
 	now := c.now()
-	fresh := make(map[K]*ttlCacheEntry[V], len(in))
-	var expired int
+	fresh := make(map[K]*ttlCacheEntry[K, V], len(in))
 	for _, it := range in {
-		if now.After(it.ExpiresAt) {
-			expired++
-			continue
+		if !now.After(it.ExpiresAt) {
+			fresh[it.Key] = &ttlCacheEntry[K, V]{key: it.Key, value: it.Value, expiresAt: it.ExpiresAt}
 		}
-		fresh[it.Key] = &ttlCacheEntry[V]{value: it.Value, expiresAt: it.ExpiresAt}
 	}
+	old := c.entries
 	c.entries = fresh
+	clear(c.inflight)
+	c.expiry = nil
+	var removed []ttlCacheEvicted[K, V]
+	if c.maxEntries > 0 {
+		c.expiry = make(ttlCacheExpiryHeap[K, V], 0, len(fresh))
+		for _, entry := range fresh {
+			c.expiry.Push(entry)
+		}
+		heap.Init(&c.expiry)
+		for len(fresh) > c.maxEntries {
+			evicted := c.removeEarliestLocked(now)
+			if c.onEvict != nil {
+				removed = append(removed, evicted)
+			}
+		}
+		// A large snapshot should not leave the bounded cache holding
+		// on to the snapshot-sized map and heap allocations.
+		if len(in) > c.maxEntries {
+			c.entries = make(map[K]*ttlCacheEntry[K, V], len(fresh))
+			for key, entry := range fresh {
+				c.entries[key] = entry
+			}
+			c.expiry = append(ttlCacheExpiryHeap[K, V](nil), c.expiry...)
+		}
+	}
+	c.evictions += int64(len(old))
 	c.mu.Unlock()
+
+	for key, entry := range old {
+		c.notifyEvict(key, entry.value, TTLCacheEvictCleared)
+	}
+	for _, evicted := range removed {
+		c.notifyRemoval(evicted)
+	}
 	return nil
 }

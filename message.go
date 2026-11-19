@@ -11,6 +11,7 @@ package discordgo
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"regexp"
 	"strings"
@@ -87,6 +88,8 @@ type Message struct {
 
 	// A list of components attached to the message.
 	Components []MessageComponent `json:"-"`
+	// Nonce is the original string or integer as JSON, when Discord includes it.
+	Nonce json.RawMessage `json:"nonce,omitempty"`
 
 	// A list of embeds present in the message.
 	Embeds []*MessageEmbed `json:"embeds"`
@@ -259,12 +262,36 @@ type MessageSend struct {
 	StickerIDs      []string                `json:"sticker_ids"`
 	Flags           MessageFlags            `json:"flags,omitempty"`
 	Poll            *Poll                   `json:"poll,omitempty"`
+	// Nonce is a string or integer of up to 25 characters used to identify a send.
+	Nonce any `json:"nonce,omitempty"`
+	// EnforceNonce asks Discord to return a recent message by the same author with the same nonce.
+	EnforceNonce bool `json:"enforce_nonce,omitempty"`
 
 	// TODO: Remove this when compatibility is not required.
 	File *File `json:"-"`
 
 	// TODO: Remove this when compatibility is not required.
 	Embed *MessageEmbed `json:"-"`
+}
+
+// MarshalJSON omits legacy content fields from Components V2 messages.
+func (m MessageSend) MarshalJSON() ([]byte, error) {
+	type messageSend MessageSend
+	if m.Flags&MessageFlagsIsComponentsV2 == 0 {
+		return Marshal(messageSend(m))
+	}
+	if m.Content != "" || len(m.Embeds) > 0 || m.Embed != nil || len(m.StickerIDs) > 0 || m.Poll != nil {
+		return nil, errors.New("Components V2 messages cannot include content, embeds, stickers, or a poll")
+	}
+	if len(m.Components) == 0 {
+		return nil, errors.New("Components V2 messages require at least one component")
+	}
+	return Marshal(struct {
+		messageSend
+		Embeds     []*MessageEmbed `json:"embeds,omitempty"`
+		StickerIDs []string        `json:"sticker_ids,omitempty"`
+		TTS        bool            `json:"tts,omitempty"`
+	}{messageSend: messageSend(m), TTS: m.TTS})
 }
 
 // MessageEdit is used to chain parameters via ChannelMessageEditComplex, which

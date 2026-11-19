@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -383,8 +384,101 @@ func TestTokenManagerConcurrentRefresh(t *testing.T) {
 		t.Fatalf("concurrent Token() returned %d distinct tokens", len(unique))
 	}
 	if _, r := ft.grantCounts(); r != 1 {
-		t.Fatalf("refreshes = %d, want exactly 1 (singleflight via mutex)", r)
+		t.Fatalf("refreshes = %d, want exactly 1", r)
 	}
+}
+
+func TestTokenManagerAutoRefreshSharesRequest(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		var requests atomic.Int32
+		client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			requests.Add(1)
+			<-release
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"access_token":"fresh","expires_in":3600}`)),
+			}, nil
+		})}
+		tm := NewTokenManager(OAuth2ClientConfig{HTTPClient: client}, TokenManagerOptions{})
+		defer tm.Close()
+		tm.SetToken(&OAuth2Token{AccessToken: "stale", RefreshToken: "rt", Expiry: time.Now().Add(-time.Hour)})
+		if err := tm.StartAutoRefresh(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+
+		tokenErr := make(chan error, 1)
+		forceErr := make(chan error, 1)
+		go func() {
+			token, err := tm.Token(context.Background())
+			if err == nil && token != "fresh" {
+				err = fmt.Errorf("Token() = %q, want fresh", token)
+			}
+			tokenErr <- err
+		}()
+		go func() {
+			forceErr <- tm.ForceRefresh(context.Background())
+		}()
+		synctest.Wait()
+		close(release)
+
+		if err := <-tokenErr; err != nil {
+			t.Fatal(err)
+		}
+		if err := <-forceErr; err != nil {
+			t.Fatal(err)
+		}
+		if n := requests.Load(); n != 1 {
+			t.Fatalf("sent %d refresh requests, want 1", n)
+		}
+		if token, _ := tm.Current(); token.RefreshToken != "rt" {
+			t.Fatalf("refresh response omitted refresh_token; got %q, want rt", token.RefreshToken)
+		}
+	})
+}
+
+func TestTokenManagerAutoRefreshBackoff(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var requests atomic.Int32
+		client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if requests.Add(1) < 3 {
+				return &http.Response{
+					StatusCode: http.StatusServiceUnavailable,
+					Body:       io.NopCloser(strings.NewReader("{}")),
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"access_token":"fresh","expires_in":3600}`)),
+			}, nil
+		})}
+		tm := NewTokenManager(OAuth2ClientConfig{HTTPClient: client}, TokenManagerOptions{})
+		defer tm.Close()
+		tm.SetToken(&OAuth2Token{AccessToken: "stale", RefreshToken: "rt", Expiry: time.Now().Add(-time.Hour)})
+		if err := tm.StartAutoRefresh(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		if n := requests.Load(); n != 1 {
+			t.Fatalf("sent %d refresh requests before backoff, want 1", n)
+		}
+		time.Sleep(time.Second)
+		synctest.Wait()
+		if n := requests.Load(); n != 2 {
+			t.Fatalf("sent %d refresh requests after one second, want 2", n)
+		}
+		time.Sleep(time.Second)
+		synctest.Wait()
+		if n := requests.Load(); n != 2 {
+			t.Fatalf("sent %d refresh requests before second backoff elapsed, want 2", n)
+		}
+		time.Sleep(time.Second)
+		synctest.Wait()
+		if token, _ := tm.Current(); token.AccessToken != "fresh" {
+			t.Fatalf("token after retry = %q, want fresh", token.AccessToken)
+		}
+	})
 }
 
 func TestTokenManagerForceRefreshAndErrors(t *testing.T) {

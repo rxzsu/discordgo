@@ -266,18 +266,6 @@ func TestParseSnowflakeInt64(t *testing.T) {
 	}
 }
 
-func TestIdentifyDelayForConcurrency(t *testing.T) {
-	if got := identifyDelayForConcurrency(0); got != DefaultIdentifyDelay {
-		t.Fatalf("concurrency 0 should behave like 1, got %v", got)
-	}
-	if got := identifyDelayForConcurrency(1); got != 5*time.Second {
-		t.Fatalf("got %v", got)
-	}
-	if got := identifyDelayForConcurrency(16); got != 5*time.Second/16 {
-		t.Fatalf("got %v", got)
-	}
-}
-
 func TestShardManagerFanOut(t *testing.T) {
 	m := NewShardManager(ShardingConfig{Token: "Bot test", ShardCount: 3})
 

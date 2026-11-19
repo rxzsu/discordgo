@@ -8,8 +8,8 @@
 // This file implements OAuth2 token lifecycle management on top of the
 // authorization-code flow in oauth2flow_token.go:
 //
-//   - TokenManager: holds the current token, refreshes it lazily under a
-//     mutex (single refresh for any number of concurrent callers), can run
+//   - TokenManager: holds the current token, shares refreshes across
+//     concurrent callers, can run
 //     a background auto-refresh goroutine, and persists the token as JSON.
 //   - OAuth2Transport: an http.RoundTripper that injects the bearer token
 //     into requests and restarts a request once after a 401 by forcing a
@@ -69,6 +69,7 @@ const (
 	// oAuth2AutoPollInterval is how often the auto-refresher re-evaluates
 	// when there is no token (yet) or the token has no expiry.
 	oAuth2AutoPollInterval = time.Second
+	oAuth2MaxRetryDelay    = 30 * time.Second
 )
 
 // TokenManager manages the lifecycle of a single OAuth2 token: lazy
@@ -86,10 +87,17 @@ type TokenManager struct {
 	refreshJitter time.Duration
 	onTokenChange func(*OAuth2Token)
 	closed        bool
+	refreshing    *oauth2RefreshCall
 
-	stop     chan struct{}
-	stopOnce sync.Once
-	autoWG   sync.WaitGroup
+	cancelAutoRefresh context.CancelFunc
+	stopOnce          sync.Once
+	autoWG            sync.WaitGroup
+}
+
+type oauth2RefreshCall struct {
+	done  chan struct{}
+	token string
+	err   error
 }
 
 // compile-time assertion that TokenManager provides OAuth2TokenSource.
@@ -158,6 +166,17 @@ func (tm *TokenManager) ExchangeCode(ctx context.Context, code string) error {
 // refreshing it first when it is expired or expires within the refresh
 // lead time. Concurrent callers share a single refresh.
 func (tm *TokenManager) Token(ctx context.Context) (string, error) {
+	return tm.refresh(ctx, false)
+}
+
+// ForceRefresh implements OAuth2TokenSource. It obtains a new token via
+// the refresh grant even if the current one has not expired.
+func (tm *TokenManager) ForceRefresh(ctx context.Context) error {
+	_, err := tm.refresh(ctx, true)
+	return err
+}
+
+func (tm *TokenManager) refresh(ctx context.Context, force bool) (string, error) {
 	tm.mu.Lock()
 	if tm.closed {
 		tm.mu.Unlock()
@@ -169,7 +188,7 @@ func (tm *TokenManager) Token(ctx context.Context) (string, error) {
 	}
 
 	// Fast path: token usable and not due for a refresh.
-	if tm.tok.AccessToken != "" && !tm.expiresSoonLocked() {
+	if !force && tm.tok.AccessToken != "" && !tm.expiresSoonLocked() {
 		token := tm.tok.AccessToken
 		tm.mu.Unlock()
 		return token, nil
@@ -178,7 +197,7 @@ func (tm *TokenManager) Token(ctx context.Context) (string, error) {
 	// The token expired (or expires soon). Without a refresh token there
 	// is nothing to do: serve a not-yet-expired token as a last resort.
 	if tm.tok.RefreshToken == "" {
-		if !tm.tok.Expired() && tm.tok.AccessToken != "" {
+		if !force && !tm.tok.Expired() && tm.tok.AccessToken != "" {
 			token := tm.tok.AccessToken
 			tm.mu.Unlock()
 			return token, nil
@@ -187,37 +206,41 @@ func (tm *TokenManager) Token(ctx context.Context) (string, error) {
 		return "", ErrOAuth2NoRefreshToken
 	}
 
-	tok, err := tm.flow.RefreshToken(ctx, tm.tok.RefreshToken)
-	if err != nil {
+	if call := tm.refreshing; call != nil {
 		tm.mu.Unlock()
-		return "", err
+		select {
+		case <-call.done:
+			return call.token, call.err
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
 	}
-	tm.setTokenLocked(tok)
-	token := tok.AccessToken
+	current := tm.tok
+	call := &oauth2RefreshCall{done: make(chan struct{})}
+	tm.refreshing = call
 	tm.mu.Unlock()
-	return token, nil
-}
 
-// ForceRefresh implements OAuth2TokenSource. It obtains a new token via
-// the refresh grant even if the current one has not expired.
-func (tm *TokenManager) ForceRefresh(ctx context.Context) error {
+	tok, err := tm.flow.RefreshToken(ctx, current.RefreshToken)
+
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
+	defer close(call.done)
+	tm.refreshing = nil
 	if tm.closed {
-		return ErrOAuth2TokenClosed
+		call.err = ErrOAuth2TokenClosed
+	} else if tm.tok != current {
+		// A newer token was stored during the request.
+		call.token = tm.tok.AccessToken
+	} else if err != nil {
+		call.err = err
+	} else {
+		if tok.RefreshToken == "" {
+			tok.RefreshToken = current.RefreshToken
+		}
+		tm.setTokenLocked(tok)
+		call.token = tok.AccessToken
 	}
-	if tm.tok == nil {
-		return ErrOAuth2NoToken
-	}
-	if tm.tok.RefreshToken == "" {
-		return ErrOAuth2NoRefreshToken
-	}
-	tok, err := tm.flow.RefreshToken(ctx, tm.tok.RefreshToken)
-	if err != nil {
-		return err
-	}
-	tm.setTokenLocked(tok)
-	return nil
+	return call.token, call.err
 }
 
 // setTokenLocked stores tok and fires the change callback. Callers must
@@ -257,32 +280,36 @@ func (tm *TokenManager) StartAutoRefresh(ctx context.Context) error {
 		tm.mu.Unlock()
 		return ErrOAuth2TokenClosed
 	}
-	if tm.stop != nil {
+	if tm.cancelAutoRefresh != nil {
 		tm.mu.Unlock()
 		return nil // already running
 	}
-	tm.stop = make(chan struct{})
-	stop := tm.stop
+	ctx, cancel := context.WithCancel(ctx)
+	tm.cancelAutoRefresh = cancel
 	tm.autoWG.Add(1)
 	tm.mu.Unlock()
 
 	go func() {
 		defer tm.autoWG.Done()
+		defer cancel()
+		var retryDelay time.Duration
 		for {
-			delay := tm.nextAutoDelay()
+			delay := max(tm.nextAutoDelay(), retryDelay)
 			timer := time.NewTimer(delay)
 			select {
 			case <-ctx.Done():
 				timer.Stop()
 				return
-			case <-stop:
-				timer.Stop()
-				return
 			case <-timer.C:
 			}
-			// Best effort: a failed refresh is retried on the next tick
-			// and the lazy Token path still refreshes on demand.
-			_ = tm.refreshIfDue(ctx)
+			if ctx.Err() != nil {
+				return
+			}
+			if err := tm.refreshIfDue(ctx); err != nil {
+				retryDelay = min(oAuth2MaxRetryDelay, max(oAuth2AutoPollInterval, retryDelay*2))
+				continue
+			}
+			retryDelay = 0
 		}
 	}()
 	return nil
@@ -294,7 +321,7 @@ func (tm *TokenManager) nextAutoDelay() time.Duration {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	if tm.closed {
-		return time.Hour // Close will close stop and wake us; delay is moot
+		return time.Hour // Close cancels the context and wakes us.
 	}
 	if tm.tok == nil || tm.tok.RefreshToken == "" || tm.tok.Expiry.IsZero() {
 		return oAuth2AutoPollInterval
@@ -317,30 +344,9 @@ func (tm *TokenManager) refreshIfDue(ctx context.Context) error {
 		tm.mu.Unlock()
 		return nil
 	}
-	refresh := tm.tok.RefreshToken
 	tm.mu.Unlock()
-
-	tok, err := tm.flow.RefreshToken(ctx, refresh)
-	if err != nil {
-		// TokenManager may have been closed while refreshing; report that
-		// instead of storing a token in a closed manager.
-		tm.mu.Lock()
-		closed := tm.closed
-		tm.mu.Unlock()
-		if closed {
-			return ErrOAuth2TokenClosed
-		}
-		return err
-	}
-
-	// Store the refreshed token only if it still belongs to the same
-	// refresh chain: another caller may have advanced it meanwhile.
-	tm.mu.Lock()
-	if !tm.closed && tm.tok != nil && tm.tok.RefreshToken == refresh {
-		tm.setTokenLocked(tok)
-	}
-	tm.mu.Unlock()
-	return nil
+	_, err := tm.refresh(ctx, false)
+	return err
 }
 
 // Close stops the auto-refresh goroutine and makes the manager refuse new
@@ -353,10 +359,10 @@ func (tm *TokenManager) Close() {
 			return
 		}
 		tm.closed = true
-		stop := tm.stop
+		cancel := tm.cancelAutoRefresh
 		tm.mu.Unlock()
-		if stop != nil {
-			close(stop)
+		if cancel != nil {
+			cancel()
 		}
 		tm.autoWG.Wait()
 	})

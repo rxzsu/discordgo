@@ -3,6 +3,7 @@ package discordgo
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/coder/websocket"
@@ -211,6 +213,73 @@ func TestShardManagerOpenContextSuccessAndReopen(t *testing.T) {
 	if configured != 4 || identifies.Load() != 2 {
 		t.Fatalf("configured=%d identifies=%d", configured, identifies.Load())
 	}
+}
+
+func TestShardManagerUsesIdentifyConcurrencyAndBudget(t *testing.T) {
+	gateway, _, identifies := testGateway(t, "")
+	remaining := 1
+	m := NewShardManager(ShardingConfig{
+		Token: "Bot test",
+		ConfigureSession: func(s *Session) {
+			s.gateway = gateway
+			s.Client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				body := fmt.Sprintf(`{"shards":2,"session_start_limit":{"max_concurrency":2,"total":100,"remaining":%d,"reset_after":3600000}}`, remaining)
+				return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}, nil
+			})}
+		},
+	})
+	t.Cleanup(m.Close)
+	if err := m.Open(); !errors.Is(err, ErrGatewayIdentifyBudget) {
+		t.Fatalf("expected budget error, got %v", err)
+	}
+	if identifies.Load() != 0 {
+		t.Fatal("sent IDENTIFY after failed budget check")
+	}
+	remaining = 2
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := m.OpenContext(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if identifies.Load() != 2 || len(m.Sessions) != 2 || m.Sessions[1].ShardID != 1 {
+		t.Fatalf("expected both shards in ID order, got %d identifies and %d sessions", identifies.Load(), len(m.Sessions))
+	}
+}
+
+func TestShardIdentifySchedulerPacesBucketsAndRefreshesBudget(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		limits := SessionInformation{Total: 3, Remaining: 3, ResetAfter: 20000, MaxConcurrency: 2}
+		refreshes := 0
+		scheduler := newShardIdentifyScheduler(2, DefaultIdentifyDelay, limits, func(context.Context) (*GatewayBotResponse, error) {
+			refreshes++
+			return &GatewayBotResponse{SessionStartLimit: limits}, nil
+		})
+		defer scheduler.stop()
+		send := func(context.Context) error { return nil }
+		ctx := context.Background()
+		start := time.Now()
+		for _, shardID := range []int{0, 1} {
+			if err := scheduler.write(ctx, shardID, send); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if elapsed := time.Since(start); elapsed != 0 {
+			t.Fatalf("independent buckets waited %v", elapsed)
+		}
+		if err := scheduler.write(ctx, 2, send); err != nil {
+			t.Fatal(err)
+		}
+		if elapsed := time.Since(start); elapsed != DefaultIdentifyDelay {
+			t.Fatalf("same bucket waited %v", elapsed)
+		}
+		if err := scheduler.write(ctx, 3, send); !errors.Is(err, ErrGatewayIdentifyBudget) {
+			t.Fatalf("expected budget error, got %v", err)
+		}
+		time.Sleep(15 * time.Second)
+		if err := scheduler.write(ctx, 3, send); err != nil || refreshes != 1 {
+			t.Fatalf("budget refresh count=%d, error=%v", refreshes, err)
+		}
+	})
 }
 
 func TestShardManagerFailureClosesEarlierShards(t *testing.T) {

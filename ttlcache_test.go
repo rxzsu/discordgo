@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -881,4 +882,219 @@ func TestCachedSessionStatsAndDisabledCaches(t *testing.T) {
 	if st.ChannelLen != 0 || st.MemberLen != 0 {
 		t.Fatalf("stats = %+v", st)
 	}
+}
+
+func TestTTLCacheInvalidationDetachesLoader(t *testing.T) {
+	for _, action := range []string{"delete", "clear", "load JSON", "set", "guild invalidation"} {
+		t.Run(action, func(t *testing.T) {
+			cache := NewTTLCache(TTLCacheOptions[memberCacheKey, *Member]{JanitorInterval: -1})
+			t.Cleanup(cache.Close)
+			key := memberCacheKey{GuildID: "guild", UserID: "user"}
+			otherKey := memberCacheKey{GuildID: "other", UserID: "user"}
+			otherMember := &Member{Nick: "other"}
+			cache.Set(otherKey, otherMember)
+
+			startLoad := func(value *Member) (func(), <-chan *Member) {
+				started := make(chan struct{})
+				release := make(chan struct{})
+				var finish sync.Once
+				unblock := func() { finish.Do(func() { close(release) }) }
+				t.Cleanup(unblock)
+				result := make(chan *Member, 1)
+				go func() {
+					got, _ := cache.GetOrLoad(context.Background(), key, func(context.Context, memberCacheKey) (*Member, error) {
+						close(started)
+						<-release
+						return value, nil
+					})
+					result <- got
+				}()
+				select {
+				case <-started:
+				case <-time.After(time.Second):
+					t.Fatal("loader did not start")
+				}
+				return unblock, result
+			}
+
+			waitResult := func(result <-chan *Member, want *Member) {
+				t.Helper()
+				select {
+				case got := <-result:
+					if got != want {
+						t.Fatalf("load returned %p, want %p", got, want)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("loader did not finish")
+				}
+			}
+
+			oldMember := &Member{Nick: "old"}
+			newMember := &Member{Nick: "new"}
+			releaseOld, oldResult := startLoad(oldMember)
+			switch action {
+			case "delete":
+				if cache.Delete(key) {
+					t.Fatal("Delete reported a live entry for an in-flight load")
+				}
+			case "clear":
+				cache.Clear()
+			case "load JSON":
+				if err := cache.LoadJSON([]byte("[]")); err != nil {
+					t.Fatal(err)
+				}
+			case "set":
+				cache.Set(key, newMember)
+				releaseOld()
+				waitResult(oldResult, oldMember)
+				if got, ok := cache.Get(key); !ok || got != newMember {
+					t.Fatalf("explicit write was overwritten: %p, %t", got, ok)
+				}
+				return
+			case "guild invalidation":
+				cachedSession := CachedSession{members: cache}
+				cachedSession.InvalidateGuild(key.GuildID)
+				if got, ok := cache.Get(otherKey); !ok || got != otherMember {
+					t.Fatalf("other guild's value was removed: %p, %t", got, ok)
+				}
+			}
+			releaseNew, newResult := startLoad(newMember)
+			releaseOld()
+			waitResult(oldResult, oldMember)
+			if got, ok := cache.Get(key); ok {
+				t.Fatalf("old load populated the cache with %p", got)
+			}
+			cache.mu.Lock()
+			newCall := cache.inflight[key]
+			cache.mu.Unlock()
+			if newCall == nil {
+				t.Fatal("old loader removed the new in-flight call")
+			}
+			releaseNew()
+			waitResult(newResult, newMember)
+			if got, ok := cache.Get(key); !ok || got != newMember {
+				t.Fatalf("new load did not populate cache: %p, %t", got, ok)
+			}
+		})
+	}
+}
+
+func TestTTLCacheExpiryRemovalReasons(t *testing.T) {
+	clock := newFakeClock()
+	var reasons []TTLCacheEvictReason
+	cache := NewTTLCache(TTLCacheOptions[string, int]{
+		TTL: time.Hour, MaxEntries: 1, JanitorInterval: -1, Now: clock.Now,
+		OnEvict: func(_ string, _ int, reason TTLCacheEvictReason) {
+			reasons = append(reasons, reason)
+		},
+	})
+	t.Cleanup(cache.Close)
+	expire := func() {
+		cache.SetWithTTL("expired", 1, time.Second)
+		clock.Advance(2 * time.Second)
+	}
+	expire()
+	cache.Set("live", 2)
+	cache.Set("next", 3)
+	expire()
+	cache.Get("expired")
+	expire()
+	if cache.Delete("expired") {
+		t.Fatal("Delete reported an expired entry as live")
+	}
+	expire()
+	_, err := cache.GetOrLoad(context.Background(), "expired", func(context.Context, string) (int, error) {
+		return 5, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expire()
+	clock.Advance(time.Hour)
+	cache.removeExpired()
+	want := []TTLCacheEvictReason{
+		TTLCacheEvictExpired, TTLCacheEvictCapacity, TTLCacheEvictCapacity,
+		TTLCacheEvictExpired, TTLCacheEvictExpired, TTLCacheEvictExpired,
+		TTLCacheEvictOverwritten, TTLCacheEvictExpired,
+	}
+	if !slices.Equal(reasons, want) {
+		t.Fatalf("eviction reasons = %v, want %v", reasons, want)
+	}
+	if metrics := cache.Metrics(); metrics.Expired != 5 || metrics.Evictions != 2 {
+		t.Fatalf("unexpected eviction counters: %+v", metrics)
+	}
+}
+
+func TestTTLCacheLoadJSONRespectsCapacity(t *testing.T) {
+	clock := newFakeClock()
+	source := NewTTLCache(TTLCacheOptions[string, int]{Now: clock.Now, JanitorInterval: -1})
+	t.Cleanup(source.Close)
+	source.SetWithTTL("first", 1, time.Minute)
+	source.SetWithTTL("second", 2, 2*time.Minute)
+	source.SetWithTTL("third", 3, 3*time.Minute)
+	snapshot, err := source.SaveJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := NewTTLCache(TTLCacheOptions[string, int]{MaxEntries: 2, Now: clock.Now, JanitorInterval: -1})
+	t.Cleanup(cache.Close)
+	cache.Set("old", 9)
+	if err := cache.LoadJSON(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if length := cache.Len(); length != 2 {
+		t.Fatalf("restored %d entries, want 2", length)
+	}
+	for _, key := range []string{"second", "third"} {
+		if _, ok := cache.Get(key); !ok {
+			t.Errorf("restored cache is missing %q", key)
+		}
+	}
+	cache.SetWithTTL("new", 4, 30*time.Second)
+	if _, ok := cache.Get("new"); !ok {
+		t.Fatal("cache evicted the new entry instead of an existing entry")
+	}
+	if _, ok := cache.Get("second"); ok {
+		t.Fatal("cache retained the existing entry with earliest expiry")
+	}
+}
+
+func BenchmarkTTLCacheCapacityChurn(b *testing.B) {
+	for _, capacity := range []int{256, 4096, 16384} {
+		b.Run(fmt.Sprint(capacity), func(b *testing.B) {
+			cache := NewTTLCache(TTLCacheOptions[int, int]{TTL: time.Hour, MaxEntries: capacity})
+			defer cache.Close()
+			for i := range capacity {
+				cache.Set(i, i)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := range b.N {
+				cache.Set(capacity+i, i)
+			}
+		})
+	}
+}
+
+func BenchmarkTTLCacheParallelReadDuringChurn(b *testing.B) {
+	const capacity = 4096
+	cache := NewTTLCache(TTLCacheOptions[int, int]{TTL: time.Hour, MaxEntries: capacity})
+	defer cache.Close()
+	cache.SetWithTTL(0, 0, 2*time.Hour)
+	for i := 1; i < capacity; i++ {
+		cache.Set(i, i)
+	}
+	var next atomic.Int64
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for i := 0; pb.Next(); i++ {
+			if i%16 == 0 {
+				key := capacity + int(next.Add(1))
+				cache.Set(key, key)
+			} else {
+				cache.Get(0)
+			}
+		}
+	})
 }

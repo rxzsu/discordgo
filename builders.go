@@ -113,7 +113,8 @@ func (b *EmbedBuilder) Build() *MessageEmbed {
 //			AddButton(discordgo.NewPrimaryButton("docs", "open-docs"))).
 //		Send(s, channelID)
 type MessageBuilder struct {
-	send MessageSend
+	send         MessageSend
+	componentsV2 bool
 }
 
 // NewMessage returns an empty MessageBuilder.
@@ -166,6 +167,13 @@ func (b *MessageBuilder) Components(components []MessageComponent) *MessageBuild
 	return b
 }
 
+// ComponentsV2 opts into Components V2. Add components with AddComponent or
+// AddRow. Components V2 messages cannot contain legacy content, embeds, stickers, or a poll.
+func (b *MessageBuilder) ComponentsV2() *MessageBuilder {
+	b.componentsV2 = true
+	return b
+}
+
 // TTS enables text-to-speech.
 func (b *MessageBuilder) TTS(tts bool) *MessageBuilder {
 	b.send.TTS = tts
@@ -208,6 +216,14 @@ func (b *MessageBuilder) Flags(flags MessageFlags) *MessageBuilder {
 	return b
 }
 
+// Nonce sets the message nonce and whether Discord should deduplicate recent
+// sends by the same author. Reuse the same nonce when retrying the same send.
+func (b *MessageBuilder) Nonce(nonce string, enforce bool) *MessageBuilder {
+	b.send.Nonce = nonce
+	b.send.EnforceNonce = enforce
+	return b
+}
+
 // Poll attaches a poll.
 func (b *MessageBuilder) Poll(poll *Poll) *MessageBuilder {
 	b.send.Poll = poll
@@ -217,6 +233,9 @@ func (b *MessageBuilder) Poll(poll *Poll) *MessageBuilder {
 // Build returns the constructed MessageSend. The builder remains reusable.
 func (b *MessageBuilder) Build() *MessageSend {
 	send := b.send
+	if b.componentsV2 {
+		send.Flags |= MessageFlagsIsComponentsV2
+	}
 	return &send
 }
 

@@ -122,11 +122,9 @@ func appcmdCompareBytes(cmd *ApplicationCommand) ([]byte, error) {
 //
 //   - server-assigned fields (ID, ApplicationID, Version, GuildID) are cleared,
 //   - an unset command type (0) is normalized to ChatApplicationCommand,
-//   - for slash commands, whose names Discord lowercases, the command, option
-//     and choice names are lowercased,
+//   - for slash commands, the command and option names are lowercased,
 //   - optional pointers equal to their default value are collapsed to nil
-//     (default_permission:true, dm_permission:true, nsfw:false,
-//     default_member_permissions:0),
+//     (default_permission:true, dm_permission:true, nsfw:false),
 //   - empty slices and maps are collapsed to nil (so a nil option list
 //     compares equal to an empty one).
 func normalizeApplicationCommandForCompare(cmd *ApplicationCommand) *ApplicationCommand {
@@ -150,9 +148,6 @@ func normalizeApplicationCommandForCompare(cmd *ApplicationCommand) *Application
 	n.DefaultPermission = appcmdCollapseBoolPtr(n.DefaultPermission, true)
 	n.DMPermission = appcmdCollapseBoolPtr(n.DMPermission, true)
 	n.NSFW = appcmdCollapseBoolPtr(n.NSFW, false)
-	if n.DefaultMemberPermissions != nil && *n.DefaultMemberPermissions == 0 {
-		n.DefaultMemberPermissions = nil
-	}
 
 	n.NameLocalizations = appcmdCollapseLocaleMapPtr(n.NameLocalizations)
 	n.DescriptionLocalizations = appcmdCollapseLocaleMapPtr(n.DescriptionLocalizations)
@@ -168,7 +163,7 @@ func normalizeApplicationCommandForCompare(cmd *ApplicationCommand) *Application
 }
 
 // appcmdNormalizeCommandOptions normalizes an option tree recursively. When
-// lowerNames is set (slash commands), option and choice names are lowercased.
+// lowerNames is set (slash commands), option names are lowercased.
 func appcmdNormalizeCommandOptions(opts []*ApplicationCommandOption, lowerNames bool) []*ApplicationCommandOption {
 	if len(opts) == 0 {
 		return nil
@@ -199,9 +194,6 @@ func appcmdNormalizeCommandOptions(opts []*ApplicationCommandOption, lowerNames 
 				}
 				cc := new(ApplicationCommandOptionChoice)
 				*cc = *ch
-				if lowerNames {
-					cc.Name = strings.ToLower(cc.Name)
-				}
 				cc.NameLocalizations = appcmdCollapseLocaleMap(cc.NameLocalizations)
 				choices[j] = cc
 			}
@@ -427,7 +419,7 @@ func (s *Session) ApplicationCommandsSync(appID string, desired []*ApplicationCo
 	}
 
 	for _, u := range plan.Updates {
-		updated, err := s.ApplicationCommandEdit(appID, guildID, u.ID, appcmdEditPayload(u.Desired))
+		updated, err := s.applicationCommandSyncEdit(appID, guildID, u)
 		if err != nil {
 			return report, fmt.Errorf("application command sync: failed to update %q: %w", u.Desired.Name, err)
 		}
@@ -456,6 +448,20 @@ func appcmdEditPayload(cmd *ApplicationCommand) *ApplicationCommand {
 	c.Version = ""
 	c.GuildID = ""
 	return c
+}
+
+func (s *Session) applicationCommandSyncEdit(appID, guildID string, update *ApplicationCommandUpdate) (*ApplicationCommand, error) {
+	cmd := appcmdEditPayload(update.Desired)
+	if cmd.DefaultMemberPermissions != nil || update.Registered.DefaultMemberPermissions == nil {
+		return s.ApplicationCommandEdit(appID, guildID, update.ID, cmd)
+	}
+
+	// PATCH preserves omitted fields. Send null explicitly to clear existing permissions.
+	payload := struct {
+		*ApplicationCommand
+		DefaultMemberPermissions *int64 `json:"default_member_permissions,string"`
+	}{ApplicationCommand: cmd}
+	return s.applicationCommandEdit(appID, guildID, update.ID, payload)
 }
 
 // ApplicationCommandSnapshot is a JSON-serializable record of the commands

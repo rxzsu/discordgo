@@ -51,7 +51,8 @@ type Session struct {
 
 	// Identify is sent during initial handshake with the discord gateway.
 	// https://discord.com/developers/docs/topics/gateway#identify
-	Identify Identify
+	Identify          Identify
+	identifyScheduler *shardIdentifyScheduler
 
 	// TODO: Remove Below, Deprecated, Use Identify struct
 	// Should the session request compressed websocket data.

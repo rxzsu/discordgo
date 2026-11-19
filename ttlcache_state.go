@@ -216,17 +216,13 @@ func (c *CachedSession) InvalidateMember(guildID, userID string) {
 	}
 }
 
-// InvalidateGuild drops every cached member (and, since channels carry no
-// guild-side copy here, only members) of the given guild. It scans the
-// member cache keys, so it costs O(n) over the cache.
+// InvalidateGuild drops cached members and detaches active member loads for
+// the given guild. It scans the member cache and its active loads.
 func (c *CachedSession) InvalidateGuild(guildID string) {
-	if c.members == nil {
-		return
-	}
-	for _, k := range c.members.Keys() {
-		if k.GuildID == guildID {
-			c.members.Delete(k)
-		}
+	if c.members != nil {
+		c.members.deleteMatching(func(key memberCacheKey) bool {
+			return key.GuildID == guildID
+		})
 	}
 }
 

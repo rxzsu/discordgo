@@ -27,6 +27,9 @@ const (
 	ContainerComponent             ComponentType = 17
 	LabelComponent                 ComponentType = 18
 	FileUploadComponent            ComponentType = 19
+	RadioGroupComponent            ComponentType = 21
+	CheckboxGroupComponent         ComponentType = 22
+	CheckboxComponent              ComponentType = 23
 )
 
 // MessageComponent is a base interface for all message components.
@@ -34,6 +37,16 @@ type MessageComponent interface {
 	json.Marshaler
 	Type() ComponentType
 }
+
+// UnknownComponent preserves an unrecognized component and its JSON payload.
+type UnknownComponent struct {
+	ComponentType ComponentType
+	Raw           json.RawMessage
+}
+
+func (u UnknownComponent) Type() ComponentType { return u.ComponentType }
+
+func (u UnknownComponent) MarshalJSON() ([]byte, error) { return u.Raw.MarshalJSON() }
 
 type unmarshalableMessageComponent struct {
 	MessageComponent
@@ -77,8 +90,18 @@ func (umc *unmarshalableMessageComponent) UnmarshalJSON(src []byte) error {
 		umc.MessageComponent = &Label{}
 	case FileUploadComponent:
 		umc.MessageComponent = &FileUpload{}
+	case RadioGroupComponent:
+		umc.MessageComponent = &RadioGroup{}
+	case CheckboxGroupComponent:
+		umc.MessageComponent = &CheckboxGroup{}
+	case CheckboxComponent:
+		umc.MessageComponent = &Checkbox{}
 	default:
-		return fmt.Errorf("unknown component type: %d", v.Type)
+		if v.Type == 0 {
+			return fmt.Errorf("component requires a nonzero type")
+		}
+		umc.MessageComponent = &UnknownComponent{ComponentType: v.Type, Raw: append(json.RawMessage(nil), src...)}
+		return nil
 	}
 	return json.Unmarshal(src, umc.MessageComponent)
 }

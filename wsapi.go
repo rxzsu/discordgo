@@ -1453,11 +1453,15 @@ func (s *Session) identifyContext(ctx context.Context) error {
 	// Send Identify packet to Discord
 	op := identifyOp{2, s.Identify}
 	s.log(LogDebug, "Identify Packet: \n%#v", op)
-	s.wsMutex.Lock()
-	err := wsjson.Write(ctx, s.wsConn, op)
-	s.wsMutex.Unlock()
-
-	return err
+	send := func(ctx context.Context) error {
+		s.wsMutex.Lock()
+		defer s.wsMutex.Unlock()
+		return wsjson.Write(ctx, s.wsConn, op)
+	}
+	if s.identifyScheduler != nil {
+		return s.identifyScheduler.write(ctx, s.ShardID, send)
+	}
+	return send(ctx)
 }
 
 func (s *Session) reconnect() {
@@ -1469,11 +1473,18 @@ func (s *Session) reconnect() {
 	if s.ShouldReconnectOnError {
 
 		wait := time.Duration(1)
+		ctx := context.Background()
+		if s.identifyScheduler != nil {
+			ctx = s.identifyScheduler.ctx
+		}
 
 		for {
+			if ctx.Err() != nil {
+				return
+			}
 			s.log(LogInformational, "trying to reconnect to gateway")
 
-			err = s.Open()
+			err = s.OpenContext(ctx)
 			if err == nil {
 				s.log(LogInformational, "successfully reconnected to gateway")
 
@@ -1507,7 +1518,9 @@ func (s *Session) reconnect() {
 
 			s.log(LogError, "error reconnecting to gateway, %s", err)
 
-			<-time.After(wait * time.Second)
+			if sleepCtx(ctx, wait*time.Second) != nil {
+				return
+			}
 			wait *= 2
 			if wait > 600 {
 				wait = 600

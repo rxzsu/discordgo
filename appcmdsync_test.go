@@ -124,14 +124,14 @@ func TestApplicationCommandsEqual(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "zero default member permissions equal nil",
+			name: "zero default member permissions restrict access",
 			a: func() *ApplicationCommand {
 				c := syncTestCommand("ping", "d")
 				c.DefaultMemberPermissions = int64Ptr(0)
 				return c
 			}(),
 			b:    syncTestCommand("ping", "d"),
-			want: true,
+			want: false,
 		},
 		{
 			name: "nsfw false equals nil",
@@ -238,14 +238,26 @@ func TestApplicationCommandsEqual(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "nil vs empty-string default member permissions pointer",
+			name: "case-only choice label change",
 			a: func() *ApplicationCommand {
-				c := syncTestCommand("ban", "d")
-				c.DefaultMemberPermissions = int64Ptr(0)
+				c := syncTestCommand("drink", "d")
+				c.Options = []*ApplicationCommandOption{{
+					Type:    ApplicationCommandOptionString,
+					Name:    "beverage",
+					Choices: []*ApplicationCommandOptionChoice{{Name: "Tea", Value: "tea"}},
+				}}
 				return c
 			}(),
-			b:    syncTestCommand("ban", "d"),
-			want: true,
+			b: func() *ApplicationCommand {
+				c := syncTestCommand("drink", "d")
+				c.Options = []*ApplicationCommandOption{{
+					Type:    ApplicationCommandOptionString,
+					Name:    "beverage",
+					Choices: []*ApplicationCommandOptionChoice{{Name: "tea", Value: "tea"}},
+				}}
+				return c
+			}(),
+			want: false,
 		},
 		{
 			name: "localizations kept when non-empty",
@@ -574,6 +586,48 @@ func TestApplicationCommandsSyncREST(t *testing.T) {
 		if requests[i] != w {
 			t.Errorf("request %d = %v, want %v", i, requests[i], w)
 		}
+	}
+}
+
+func TestApplicationCommandsSyncDefaultMemberPermissions(t *testing.T) {
+	zero := int64(0)
+	for _, tc := range []struct {
+		name       string
+		registered string
+		desired    *int64
+		payload    interface{}
+	}{
+		{name: "restrict", registered: "null", desired: &zero, payload: "0"},
+		{name: "clear", registered: `"0"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, cleanup := newFeatureTestSession(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet {
+					_, _ = w.Write([]byte(`[{"id":"1001","name":"ping","type":1,"description":"d","default_member_permissions":` + tc.registered + `}]`))
+					return
+				}
+				if r.Method != http.MethodPatch || r.URL.Path != "/applications/app1/commands/1001" {
+					http.NotFound(w, r)
+					return
+				}
+				body := decodeFeatureTestBody(t, r)
+				if value, ok := body["default_member_permissions"]; !ok || value != tc.payload {
+					t.Errorf("PATCH permissions = %v (present: %t), want %v", value, ok, tc.payload)
+				}
+				_, _ = w.Write([]byte(`{"id":"1001","name":"ping","type":1,"description":"d"}`))
+			}))
+			defer cleanup()
+
+			desired := syncTestCommand("ping", "d")
+			desired.DefaultMemberPermissions = tc.desired
+			report, err := s.ApplicationCommandsSync("app1", []*ApplicationCommand{desired}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(report.Updated) != 1 {
+				t.Fatalf("expected one update, got %d", len(report.Updated))
+			}
+		})
 	}
 }
 

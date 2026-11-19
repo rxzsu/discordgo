@@ -348,6 +348,21 @@ func (b *LabelBuilder) TextInputRaw(input TextInput) *LabelBuilder {
 	return b
 }
 
+// RadioGroup wraps a radio group as the label's component.
+func (b *LabelBuilder) RadioGroup(group *RadioGroupBuilder) *LabelBuilder {
+	return b.RawComponent(group.Build())
+}
+
+// CheckboxGroup wraps a checkbox group as the label's component.
+func (b *LabelBuilder) CheckboxGroup(group *CheckboxGroupBuilder) *LabelBuilder {
+	return b.RawComponent(group.Build())
+}
+
+// Checkbox wraps a checkbox as the label's component.
+func (b *LabelBuilder) Checkbox(checkbox *CheckboxBuilder) *LabelBuilder {
+	return b.RawComponent(checkbox.Build())
+}
+
 // RawComponent wraps any raw MessageComponent (e.g. SelectMenu,
 // FileUpload) as the label's component.
 func (b *LabelBuilder) RawComponent(component MessageComponent) *LabelBuilder {

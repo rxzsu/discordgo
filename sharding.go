@@ -10,6 +10,7 @@ package discordgo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -31,9 +32,9 @@ type ShardingConfig struct {
 	// manager uses the recommended count from the GatewayBot endpoint.
 	ShardCount int
 
-	// IdentifyDelay is the pause between two shard connections. When 0,
-	// DefaultIdentifyDelay divided by the gateway's reported max
-	// concurrency is used.
+	// IdentifyDelay overrides automatic scheduling with sequential startup
+	// and a delay between shard connections. When 0, the manager uses the
+	// Gateway Bot endpoint to schedule identifies in parallel buckets.
 	IdentifyDelay time.Duration
 
 	// ConfigureSession is called before gateway discovery and before opening
@@ -56,6 +57,7 @@ type ShardManager struct {
 	opening    bool
 	closing    int
 	openCancel context.CancelFunc
+	identify   *shardIdentifyScheduler
 	mu         sync.Mutex
 	handlers   []*shardHandlerEntry
 	once       []*shardHandlerEntry
@@ -155,8 +157,7 @@ func (m *ShardManager) sessionsLocked() []*Session {
 
 // Open connects all shards. When the configured ShardCount is 0, the
 // recommended count is fetched from the GatewayBot endpoint first.
-// Shards are connected sequentially, delaying by the identify delay
-// between connections to respect Discord's identify rate limits.
+// By default, shards start in groups based on Discord's identify buckets.
 func (m *ShardManager) Open() error {
 	return m.OpenContext(context.Background())
 }
@@ -201,6 +202,9 @@ func (m *ShardManager) OpenContext(ctx context.Context) (err error) {
 	}()
 
 	count, delay := config.ShardCount, config.IdentifyDelay
+	concurrency := 1
+	var limits SessionInformation
+	var getGateway func(context.Context) (*GatewayBotResponse, error)
 	token := config.Token
 	if token != "" && !strings.HasPrefix(token, "Bot ") {
 		token = "Bot " + token
@@ -222,10 +226,14 @@ func (m *ShardManager) OpenContext(ctx context.Context) (err error) {
 		if err != nil {
 			return err
 		}
-		gw, err := probe.GatewayBot(WithContext(ctx))
+		getGateway = func(ctx context.Context) (*GatewayBotResponse, error) {
+			return probe.GatewayBot(WithContext(ctx))
+		}
+		gw, err := getGateway(ctx)
 		if err != nil {
 			return err
 		}
+		limits = gw.SessionStartLimit
 		if count == 0 {
 			count = gw.Shards
 			if count < 1 {
@@ -233,30 +241,55 @@ func (m *ShardManager) OpenContext(ctx context.Context) (err error) {
 			}
 		}
 		if delay == 0 {
-			delay = identifyDelayForConcurrency(gw.SessionStartLimit.MaxConcurrency)
+			concurrency = min(count, max(1, limits.MaxConcurrency))
 		}
 	}
+	if limits.Total > 0 && count > limits.Remaining {
+		return fmt.Errorf("%w: need %d, have %d (resets in %s)", ErrGatewayIdentifyBudget, count, limits.Remaining, identifyResetDelay(limits))
+	}
+	bucketDelay := delay
+	if bucketDelay == 0 {
+		bucketDelay = DefaultIdentifyDelay
+	}
+	scheduler := newShardIdentifyScheduler(concurrency, bucketDelay, limits, getGateway)
+	m.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		m.mu.Unlock()
+		scheduler.stop()
+		return err
+	}
+	m.identify = scheduler
+	m.mu.Unlock()
 
-	for i := 0; i < count; i++ {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		s, err := newSession(i)
-		if err != nil {
-			return err
+	for start := 0; start < count; start += concurrency {
+		end := min(start+concurrency, count)
+		sessions := make([]*Session, 0, end-start)
+		for i := start; i < end; i++ {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			s, err := newSession(i)
+			if err != nil {
+				return err
+			}
+			s.identifyScheduler = scheduler
+			sessions = append(sessions, s)
 		}
 		m.mu.Lock()
-		if err = ctx.Err(); err == nil {
-			m.addSessionLocked(s)
+		err := ctx.Err()
+		if err == nil {
+			for _, s := range sessions {
+				m.addSessionLocked(s)
+			}
 		}
 		m.mu.Unlock()
 		if err != nil {
 			return err
 		}
-		if err := s.OpenContext(ctx); err != nil {
+		if err := openShardGroup(ctx, sessions); err != nil {
 			return err
 		}
-		if i < count-1 {
+		if delay > 0 && end < count {
 			if err := sleepCtx(ctx, delay); err != nil {
 				return err
 			}
@@ -277,14 +310,22 @@ func (m *ShardManager) addSessionLocked(s *Session) {
 	m.Sessions = append(m.Sessions, s)
 }
 
-// identifyDelayForConcurrency returns the delay between identify packets
-// for the given max concurrency: Discord allows `concurrency` identifies
-// per 5 second window.
-func identifyDelayForConcurrency(concurrency int) time.Duration {
-	if concurrency < 1 {
-		concurrency = 1
+func openShardGroup(ctx context.Context, sessions []*Session) error {
+	if len(sessions) == 1 {
+		return sessions[0].OpenContext(ctx)
 	}
-	return DefaultIdentifyDelay / time.Duration(concurrency)
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	var wg sync.WaitGroup
+	for _, s := range sessions {
+		wg.Go(func() {
+			if err := s.OpenContext(ctx); err != nil {
+				cancel(err)
+			}
+		})
+	}
+	wg.Wait()
+	return context.Cause(ctx)
 }
 
 // Close disconnects every shard. Sessions that fail to close are logged
@@ -306,6 +347,10 @@ func (m *ShardManager) Close() {
 
 // detachSessionsLocked removes references before any user callbacks run.
 func (m *ShardManager) detachSessionsLocked() []*Session {
+	if m.identify != nil {
+		m.identify.stop()
+		m.identify = nil
+	}
 	sessions := m.Sessions
 	m.Sessions = nil
 	for _, s := range sessions {
@@ -317,6 +362,100 @@ func (m *ShardManager) detachSessionsLocked() []*Session {
 		}
 	}
 	return sessions
+}
+
+// ErrGatewayIdentifyBudget indicates that the Gateway Bot endpoint reported
+// too few remaining session starts for a new IDENTIFY.
+var ErrGatewayIdentifyBudget = errors.New("gateway identify budget exhausted")
+
+var errShardIdentifyStopped = errors.New("shard identify scheduler stopped")
+
+type shardIdentifyBucket struct {
+	permit chan struct{}
+	next   time.Time
+}
+
+type shardIdentifyScheduler struct {
+	ctx     context.Context
+	stop    context.CancelFunc
+	buckets []shardIdentifyBucket
+	delay   time.Duration
+
+	mu         sync.Mutex
+	limits     SessionInformation
+	resetAt    time.Time
+	getGateway func(context.Context) (*GatewayBotResponse, error)
+}
+
+func identifyResetDelay(limits SessionInformation) time.Duration {
+	return time.Duration(limits.ResetAfter) * time.Millisecond
+}
+
+func newShardIdentifyScheduler(concurrency int, delay time.Duration, limits SessionInformation, getGateway func(context.Context) (*GatewayBotResponse, error)) *shardIdentifyScheduler {
+	ctx, stop := context.WithCancel(context.Background())
+	s := &shardIdentifyScheduler{
+		ctx: ctx, stop: stop, buckets: make([]shardIdentifyBucket, concurrency), delay: delay,
+		limits: limits, resetAt: time.Now().Add(identifyResetDelay(limits)), getGateway: getGateway,
+	}
+	for i := range s.buckets {
+		s.buckets[i].permit = make(chan struct{}, 1)
+	}
+	return s
+}
+
+func (s *shardIdentifyScheduler) write(ctx context.Context, shardID int, send func(context.Context) error) error {
+	ctx, cancel := context.WithCancelCause(ctx)
+	stop := context.AfterFunc(s.ctx, func() { cancel(errShardIdentifyStopped) })
+	defer stop()
+	defer cancel(nil)
+	if s.ctx.Err() != nil {
+		return errShardIdentifyStopped
+	}
+	b := &s.buckets[shardID%len(s.buckets)]
+	select {
+	case b.permit <- struct{}{}:
+		defer func() { <-b.permit }()
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	}
+	if wait := time.Until(b.next); wait > 0 {
+		if err := sleepCtx(ctx, wait); err != nil {
+			return context.Cause(ctx)
+		}
+	}
+	if err := s.consume(ctx); err != nil {
+		return err
+	}
+	err := send(ctx)
+	b.next = time.Now().Add(s.delay)
+	return err
+}
+
+func (s *shardIdentifyScheduler) consume(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := context.Cause(ctx); err != nil {
+		return err
+	}
+	if s.limits.Total <= 0 {
+		return nil
+	}
+	if s.limits.ResetAfter > 0 && !time.Now().Before(s.resetAt) {
+		gw, err := s.getGateway(ctx)
+		if err != nil {
+			return err
+		}
+		if gw.SessionStartLimit.Total <= 0 {
+			return ErrGatewayIdentifyBudget
+		}
+		s.limits = gw.SessionStartLimit
+		s.resetAt = time.Now().Add(identifyResetDelay(s.limits))
+	}
+	if s.limits.Remaining <= 0 {
+		return ErrGatewayIdentifyBudget
+	}
+	s.limits.Remaining--
+	return nil
 }
 
 func closeShardSessions(sessions []*Session) {

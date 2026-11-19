@@ -3328,12 +3328,16 @@ func (s *Session) ApplicationCommandCreate(appID string, guildID string, cmd *Ap
 // guildID     : Guild ID to edit guild-specific application command. If empty - edits global application command.
 // cmd         : Updated application command data.
 func (s *Session) ApplicationCommandEdit(appID, guildID, cmdID string, cmd *ApplicationCommand, options ...RequestOption) (updated *ApplicationCommand, err error) {
+	return s.applicationCommandEdit(appID, guildID, cmdID, *cmd, options...)
+}
+
+func (s *Session) applicationCommandEdit(appID, guildID, cmdID string, payload interface{}, options ...RequestOption) (updated *ApplicationCommand, err error) {
 	endpoint := EndpointApplicationGlobalCommand(appID, cmdID)
 	if guildID != "" {
 		endpoint = EndpointApplicationGuildCommand(appID, guildID, cmdID)
 	}
 
-	body, err := s.RequestWithBucketID("PATCH", endpoint, *cmd, endpoint, options...)
+	body, err := s.RequestWithBucketID("PATCH", endpoint, payload, endpoint, options...)
 	if err != nil {
 		return
 	}

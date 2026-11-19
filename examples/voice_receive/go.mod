@@ -1,16 +1,25 @@
-module github.com/bwmarrin/discordgo/examples/voice_receive
+module github.com/rxzsu/discordgo/examples/voice_receive
 
-go 1.22.4
+go 1.27.4
 
 require (
-	github.com/bwmarrin/discordgo v0.28.1
 	github.com/pion/rtp v1.6.0
 	github.com/pion/webrtc/v3 v3.0.0-20200721060053-ca3cc9d940bc
+	github.com/rxzsu/discordgo v1.8.0
 )
 
 require (
-	github.com/gorilla/websocket v1.4.2 // indirect
+	github.com/bytedance/gopkg v0.1.3 // indirect
+	github.com/bytedance/sonic v1.15.5 // indirect
+	github.com/bytedance/sonic/loader v0.5.3 // indirect
+	github.com/cloudwego/base64x v0.1.6 // indirect
+	github.com/coder/websocket v1.8.15 // indirect
+	github.com/goccy/go-json v0.12.0 // indirect
+	github.com/klauspost/cpuid/v2 v2.2.9 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
-	golang.org/x/crypto v0.0.0-20210421170649-83a5a9bb288b // indirect
-	golang.org/x/sys v0.0.0-20201119102817-f84b799fce68 // indirect
+	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
+	golang.org/x/arch v0.0.0-20210923205945-b76863e36670 // indirect
+	golang.org/x/sys v0.22.0 // indirect
 )
+
+replace github.com/rxzsu/discordgo => ../..
